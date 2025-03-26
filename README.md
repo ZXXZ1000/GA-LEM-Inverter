@@ -4,14 +4,17 @@ This repository contains the implementation of a GA-based inversion method for d
 # 景观演化模型遗传算法优化使用说明
 
 ## 环境安装
-
-首先将所有代码文件放置于同一个文件夹中，然后安装所需环境：
+```bash
+git clone https://github.com/ZXXZ1000/GA-LEM-Inverter.git
+cd GA-LEM-Inverter
+```
+然后安装所需环境：
 
 ```bash
 pip install -r requirements.txt
 ```
 
-如果安装过程出现问题，可能需要单独安装一些依赖，例如GDAL库。
+如果安装过程出现问题，可能需要单独安装一些依赖，例如GDAL库、Fastscape库等。
 
 ## 代码运行分为三种模式
 
