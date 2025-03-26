@@ -1,6 +1,6 @@
 # GA-LEM-Inverter
-This repository contains the implementation of a GA-based inversion method for deciphering tectonic uplift fields from landscape topography. Features include coupling with the Fastscape LEM, a multi-dimensional fitness function with perceptual similarity (LPIPS), and dimensionality reduction. See accompanying paper: [In Submission].
-
+本代码库包含了一种基于遗传算法的景观演化模型（LEM）逆反演方法，用于从地形中解析构造隆升场。特点包括与Fastscape景观演化模型的耦合、采用感知相似性（LPIPS）的多维适应度函数以及降维策略。相关论文：[提交中]。
+[English Version](README_EN.md)
 # 景观演化模型遗传算法优化使用说明
 
 ## 环境安装
