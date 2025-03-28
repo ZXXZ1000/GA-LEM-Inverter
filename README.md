@@ -14,6 +14,7 @@ cd GA-LEM-Inverter
 
 ```bash
 pip install -r requirements.txt
+conda install xarray-simlab fastscapelib-f2py -c conda-forge
 ```
 
 如果安装过程出现问题，可能需要单独安装一些依赖，例如GDAL库、Fastscape库等。
