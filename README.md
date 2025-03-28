@@ -13,7 +13,7 @@ cd GA-LEM-Inverter
 然后安装所需环境：
 
 ```bash
-pip install -r requirements.txt
+pip install -r requirement.txt
 conda install xarray-simlab fastscapelib-f2py -c conda-forge
 ```
 
