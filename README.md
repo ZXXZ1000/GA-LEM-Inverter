@@ -6,18 +6,51 @@
 # 景观演化模型遗传算法优化使用说明
 
 ## 环境安装
+
+### 方法一：一键配置（推荐）
+
+我们提供了自动化配置脚本，可以一键完成所有环境配置：
+
 ```bash
+# 克隆仓库
 git clone https://github.com/ZXXZ1000/GA-LEM-Inverter.git
 cd GA-LEM-Inverter
+
+# 运行一键配置脚本
+bash setup_environment.sh
 ```
-然后安装所需环境：
+
+该脚本将自动：
+- 检查并安装 Miniconda（如果不存在）
+- 创建本地 Conda 环境 `./.conda`
+- 安装所有必需的包（包括 xarray-simlab 和 fastscape）
+- 注册 Jupyter 内核 "GA-LEM-Inverter (Python 3.11)"
+- 验证环境配置
+
+### 方法二：手动配置
+
+详细的手动配置步骤请参考 [ENVIRONMENT_SETUP.md](ENVIRONMENT_SETUP.md)
+
+### 快速验证
+
+环境配置完成后，可以通过以下方式验证：
 
 ```bash
-pip install -r requirement.txt
-conda install xarray-simlab fastscapelib-f2py -c conda-forge
+# 激活环境
+conda activate ./.conda
+
+# 运行测试脚本
+python test_environment.py
 ```
 
-如果安装过程出现问题，可能需要单独安装一些依赖，例如GDAL库、Fastscape库等。
+或启动 Jupyter Notebook 并选择 "GA-LEM-Inverter (Python 3.11)" 内核。
+
+### 重要提示
+
+- **推荐使用一键配置脚本**，避免手动安装时的依赖冲突
+- 环境将安装在项目目录下的 `.conda` 文件夹中，便于项目管理
+- Jupyter 内核会自动注册，可直接在 Jupyter 中选择使用
+- 如遇到问题，请参考 [ENVIRONMENT_SETUP.md](ENVIRONMENT_SETUP.md) 中的常见问题部分
 
 ## 代码运行分为三种模式
 

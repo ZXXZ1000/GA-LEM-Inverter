@@ -1,0 +1,4 @@
+{
+    "python.defaultInterpreterPath": "./.conda/bin/python",
+    "jupyter.jupyterServerType": "local"
+}
