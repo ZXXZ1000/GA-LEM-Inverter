@@ -41,6 +41,8 @@ bash setup_environment.sh --diagnose-only
 powershell -ExecutionPolicy Bypass -File .\setup_environment.ps1 -DiagnoseOnly
 ```
 
+脚本会把目标环境强制设为项目根目录下的 `.conda`。它可以复用系统或用户目录里的 base conda 作为包管理器，但所有 conda 安装命令都会使用 `-p <项目路径>/.conda`，并在安装后校验环境 Python 的 `sys.prefix` 是否真的等于该目录。
+
 如果 macOS/Linux/Git Bash 缺少基础工具，可尝试：
 
 ```bash
@@ -78,15 +80,15 @@ rm Miniconda3-latest-MacOSX-arm64.sh
 ### 3. 安装核心包
 
 ```bash
-# 激活环境并安装 xarray-simlab 和 fastscape
-./.conda/bin/conda install -c conda-forge xarray-simlab fastscape -y
+# 用 base conda 管理项目本地环境
+~/miniconda3/bin/conda install -p ./.conda -c conda-forge xarray-simlab fastscape -y
 ```
 
 ### 4. 安装其他依赖包
 
 ```bash
 # 安装 conda 可用的包
-./.conda/bin/conda install -c conda-forge \
+~/miniconda3/bin/conda install -p ./.conda -c conda-forge \
     numpy scipy matplotlib scikit-image scikit-learn \
     rasterio geopandas shapely affine pyproj \
     libpysal esda seaborn tqdm ipywidgets \
@@ -94,7 +96,7 @@ rm Miniconda3-latest-MacOSX-arm64.sh
     pyyaml dask plotly pytest black flake8 mypy -y
 
 # 安装 pip 包
-./.conda/bin/pip install torch lpips opencv-python pykrige scikit-opt
+./.conda/bin/python -m pip install torch lpips opencv-python pykrige scikit-opt
 ```
 
 ### 5. 注册 Jupyter 内核
@@ -249,17 +251,17 @@ chmod +x setup_environment.sh
 ### 更新包
 ```bash
 # 更新 conda 包
-./.conda/bin/conda update --all
+~/miniconda3/bin/conda update -p ./.conda --all
 
 # 更新 pip 包
-./.conda/bin/pip list --outdated
-./.conda/bin/pip install --upgrade package_name
+./.conda/bin/python -m pip list --outdated
+./.conda/bin/python -m pip install --upgrade package_name
 ```
 
 ### 导出环境
 ```bash
 # 导出环境配置
-./.conda/bin/conda env export > environment.yml
+~/miniconda3/bin/conda env export -p ./.conda > environment.yml
 ```
 
 ### 重建环境

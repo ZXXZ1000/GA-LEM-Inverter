@@ -277,7 +277,7 @@ def terrain_hash_similarity(matrix1, matrix2, bits=256):
     similarity = 1 - hamming_distance(hash1, hash2) / max_distance
     return similarity
 
-def terrain_similarity(matrix1, matrix2, resolution=347.4, smooth_radius=3):
+def terrain_similarity(matrix1, matrix2, resolution=347.4, smooth_radius=3, use_lpips=True):
     """
     基于多个特征和指标计算地形相似度。
 
@@ -292,9 +292,26 @@ def terrain_similarity(matrix1, matrix2, resolution=347.4, smooth_radius=3):
     """
     logging.info(f"terrain_similarity: matrix1 type={type(matrix1)}, shape={matrix1.shape if hasattr(matrix1, 'shape') else 'None'}, matrix2 type={type(matrix2)}, shape={matrix2.shape if hasattr(matrix2, 'shape') else 'None'}")
     try:
-        # 提取两个DEM的特征
-        features1 = extract_terrain_features(matrix1, resolution, smooth_radius)
-        features2 = extract_terrain_features(matrix2, resolution, smooth_radius)
+        matrix1 = np.asarray(matrix1, dtype=np.float64)
+        matrix2 = np.asarray(matrix2, dtype=np.float64)
+
+        def normalize_relief(matrix):
+            """去掉绝对海拔基准，比较相对地形形态。"""
+            finite = matrix[np.isfinite(matrix)]
+            if finite.size == 0:
+                raise ValueError("地形矩阵没有有效值")
+            relief = matrix - np.nanmin(finite)
+            relief_range = np.nanmax(relief) - np.nanmin(relief)
+            if relief_range <= 1e-12:
+                return np.zeros_like(relief)
+            return relief / relief_range
+
+        norm_matrix1 = normalize_relief(matrix1)
+        norm_matrix2 = normalize_relief(matrix2)
+
+        # 提取两个 DEM 的相对地形特征，避免不同海拔基准或固定边界把适应度带偏。
+        features1 = extract_terrain_features(norm_matrix1, resolution, smooth_radius)
+        features2 = extract_terrain_features(norm_matrix2, resolution, smooth_radius)
         
         # 计算地形特征的相似度
         elevation_sim = compare_features(features1['elevation'], features2['elevation'])
@@ -306,52 +323,56 @@ def terrain_similarity(matrix1, matrix2, resolution=347.4, smooth_radius=3):
         
         # 计算其他相似性指标
         hog_sim = compare_features(features1['hog'], features2['hog'])
-        mae = terrain_mae(matrix1, matrix2)
-        ssim_score = terrain_ssim(matrix1, matrix2)
-        correlation = terrain_correlation(matrix1, matrix2)
-        hash_sim = terrain_hash_similarity(matrix1, matrix2)
-        
+        mae = terrain_mae(norm_matrix1, norm_matrix2)
+        ssim_score = terrain_ssim(norm_matrix1, norm_matrix2)
+        correlation = terrain_correlation(norm_matrix1, norm_matrix2)
+        hash_sim = terrain_hash_similarity(norm_matrix1, norm_matrix2)
+
         # 归一化MAE
-        max_possible_mae = np.max(matrix1) - np.min(matrix1)
+        max_possible_mae = max(np.max(norm_matrix1) - np.min(norm_matrix1), 1e-12)
         normalized_mae = 1 - (mae / max_possible_mae)
 
-        #深度学习模型
-        import torch
-        import lpips
-        def terrain_perceptual_distance(matrix1, matrix2):
-            """添加警告过滤"""
-            import warnings
-            with warnings.catch_warnings():
-                warnings.filterwarnings("ignore", category=UserWarning)
-                # 确保LPIPS只初始化一次
-                if not hasattr(terrain_perceptual_distance, 'loss_fn'):
-                    terrain_perceptual_distance.loss_fn = lpips.LPIPS(
-                        net='alex', 
-                        verbose=False  # 关闭verbose模式
-                    )
-                
-                # 归一化到[-1, 1]范围
-                matrix1 = (matrix1 - matrix1.min()) / (matrix1.max() - matrix1.min()) * 2 - 1
-                matrix2 = (matrix2 - matrix2.min()) / (matrix2.max() - matrix2.min()) * 2 - 1
-                
-                # 转换为PyTorch张量并添加通道维度
-                tensor1 = torch.from_numpy(matrix1).float().unsqueeze(0).unsqueeze(0).repeat(1, 3, 1, 1)
-                tensor2 = torch.from_numpy(matrix2).float().unsqueeze(0).unsqueeze(0).repeat(1, 3, 1, 1)
-                
-                # 使用缓存的LPIPS模型
-                with torch.no_grad():
-                    distance = terrain_perceptual_distance.loss_fn(tensor1, tensor2)
-                
-                return distance.item()
+        if use_lpips:
+            #深度学习模型
+            import torch
+            import lpips
+            def terrain_perceptual_distance(matrix1, matrix2):
+                """添加警告过滤"""
+                import warnings
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("ignore", category=UserWarning)
+                    # 确保LPIPS只初始化一次
+                    if not hasattr(terrain_perceptual_distance, 'loss_fn'):
+                        terrain_perceptual_distance.loss_fn = lpips.LPIPS(
+                            net='alex',
+                            verbose=False  # 关闭verbose模式
+                        )
 
-        terrain_similarity_DL = 1-terrain_perceptual_distance(matrix1, matrix2)
+                    # 归一化到[-1, 1]范围
+                    matrix1 = (matrix1 - matrix1.min()) / (matrix1.max() - matrix1.min()) * 2 - 1
+                    matrix2 = (matrix2 - matrix2.min()) / (matrix2.max() - matrix2.min()) * 2 - 1
+
+                    # 转换为PyTorch张量并添加通道维度
+                    tensor1 = torch.from_numpy(matrix1).float().unsqueeze(0).unsqueeze(0).repeat(1, 3, 1, 1)
+                    tensor2 = torch.from_numpy(matrix2).float().unsqueeze(0).unsqueeze(0).repeat(1, 3, 1, 1)
+
+                    # 使用缓存的LPIPS模型
+                    with torch.no_grad():
+                        distance = terrain_perceptual_distance.loss_fn(tensor1, tensor2)
+
+                    return distance.item()
+
+            terrain_similarity_DL = 1-terrain_perceptual_distance(norm_matrix1, norm_matrix2)
+        else:
+            terrain_similarity_DL = terrien_sim
 
         #总相似度
         total_sim = (
-            0.3 * terrien_sim +
-            0.4 * terrain_similarity_DL +
-            0.3 * normalized_mae  +
-            0 * correlation
+            0.25 * terrien_sim +
+            0.25 * terrain_similarity_DL +
+            0.20 * normalized_mae +
+            0.20 * correlation +
+            0.10 * ssim_score
         )
         #total_sim = terrien_sim * terrain_similarity_DL
         return total_sim

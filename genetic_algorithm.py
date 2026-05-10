@@ -5,7 +5,7 @@ import logging
 import os
 os.environ['KMP_DUPLICATE_LIB_OK']='TRUE'
 import psutil
-from tqdm.notebook import tqdm
+from tqdm import tqdm
 import time
 from joblib import Parallel, delayed
 
@@ -297,7 +297,7 @@ class MyGA:
         elite_size = max(1, int(0.05 * self.size_pop))  # 保留5%的精英
         elites = self.Chrom[sorted_indices[:elite_size]]
         
-        tournament_size = 3
+        tournament_size = min(3, self.size_pop)
         selected = []
         for _ in range(self.size_pop - elite_size):
             participants = np.random.choice(self.size_pop, tournament_size, replace=False)
@@ -527,7 +527,7 @@ class MyGA:
         fitness_history = []
         
         # 多样性注入参数
-        diversity_threshold = min(25, patience_value // 2)  # 多样性注入触发阈值
+        diversity_threshold = max(1, min(25, patience_value // 2))  # 多样性注入触发阈值，避免 patience=1 时变成 0
         diversity_cooldown = 10  # 多样性注入冷却期
         last_injection_gen = -diversity_cooldown  # 上次注入的代数
         
@@ -607,6 +607,9 @@ def optimize_uplift_ga(obj_func, resampled_dem, LOW_RES_SHAPE, ORIGINAL_SHAPE,
     - fitness_history: 适应度历史
     """
     try:
+        if 'random_seed' in ga_params and ga_params['random_seed'] is not None:
+            np.random.seed(int(ga_params['random_seed']))
+
         # 设置遗传算法维度
         n_dim = LOW_RES_SHAPE[0] * LOW_RES_SHAPE[1]
         lb_array = np.full(n_dim, ga_params['lb'])

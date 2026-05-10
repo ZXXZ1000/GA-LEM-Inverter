@@ -60,10 +60,28 @@ python test_environment.py
 
 或启动 Jupyter Notebook 并选择 "GA-LEM-Inverter (Python 3.11)" 内核。
 
+### 一键运行默认 demo
+
+仓库已经内置轻量 DEM、断层和研究区示例数据，`config.ini` 默认指向这些文件。环境安装完成后，不需要修改配置即可直接运行：
+
+```bash
+python main.py
+```
+
+该命令会在 `demo_outputs/Expt_时间戳/` 下生成完整过程结果，包括日志、原始/旋转 DEM、侵蚀系数场、隆升率场、优化历史、最终模拟地形和对比图。默认 demo 还会输出 `demo_metrics.txt` 和 `demo_true_vs_inverted_uplift.png`，用于检查反演隆升场与内置真值、模拟地形与目标地形的相关性。
+
+合成地形验证也默认配置为轻量 demo：
+
+```bash
+python run_synthetic_experiment.py
+```
+
+该命令会在 `demo_outputs/synthetic_experiments/` 下生成合成 DEM、真实/反演隆升场、适应度历史和评价指标。正式实验时再按脚本顶部中文注释调大网格、种群和迭代次数。
+
 ### 重要提示
 
 - **推荐使用一键配置脚本**，避免手动安装时的依赖冲突
-- 环境将安装在项目目录下的 `.conda` 文件夹中，便于项目管理
+- 环境会被强制安装在项目目录下的 `.conda` 文件夹中；脚本即使复用系统/base conda，也会通过 `-p <项目路径>/.conda` 管理目标环境，并在安装后校验 `sys.prefix`
 - Jupyter 内核会自动注册，可直接在 Jupyter 中选择使用
 - 如遇到问题，请参考 [ENVIRONMENT_SETUP.md](ENVIRONMENT_SETUP.md) 中的常见问题部分
 
@@ -79,9 +97,10 @@ python test_environment.py
    ```bash
    python run_synthetic_experiment.py
    ```
+   默认会跑一个轻量 `simple` 合成 demo，用于快速验证环境和算法流程。正式实验参数请按 `run_synthetic_experiment.py` 顶部中文注释修改。
 
 #### 主要参数（可在run_synthetic_experiment.py中修改）：
-- `shape`: 地形栅格大小，默认(100, 100)
+- `shape`: 地形栅格大小，默认 demo 为 (64, 64)，正式实验可改为 (100, 100) 或更高
 - `patterns`: 测试的隆升模式，有'simple'（简单）, 'medium'（中等）, 'complex'（复杂）三种
 - `scale_factor`: 降维因子，越大运算越快但精度降低
 - `ga_params`: 遗传算法参数
@@ -140,7 +159,7 @@ python test_environment.py
 真实地形测试使用真实的DEM数据进行隆升场反演。
 
 #### 运行步骤：
-1. 根据config.ini文件准备实验数据
+1. 默认 `config.ini` 已指向仓库内置 demo 数据，可直接运行；正式实验再替换 DEM、断层和研究区路径
 2. 运行：
    ```bash
    python main.py
@@ -150,8 +169,8 @@ python test_environment.py
 
 **[Paths]部分**
 - `terrain_path`: DEM文件路径（支持.tif格式）
-- `fault_shp_path`: 断层shapefile文件路径
-- `study_area_shp_path`: 研究区shapefile文件路径
+- `fault_shp_path`: 断层shapefile文件路径；可留空，留空时使用均一侵蚀系数场
+- `study_area_shp_path`: 研究区shapefile文件路径；可留空，留空时使用 DEM 全域且不旋转
 - `output_path`: 结果输出目录
 
 **[Model]部分**
@@ -159,9 +178,9 @@ python test_environment.py
 - `ksp_fault`: 断层带侵蚀系数，默认2e-5
 - `d_diff_value`: 坡地扩散系数，默认19.2
 - `boundary_status`: 边界条件，通常使用"fixed_value"
-- `area_exp`: 面积指数，默认0.43
+- `area_exp`: 面积指数，默认0.42
 - `slope_exp`: 坡度指数，默认1.0
-- `time_total`: 总模拟时间（年），根据研究区地质历史设置，通常为百万年至千万年量级
+- `time_total`: 总模拟时间（年），默认 demo 为 2e5；正式实验需根据研究区地质历史重新设置
 
 **[GeneticAlgorithm]部分**
 - `ga_pop_size`: 种群大小，越大探索能力越强但计算时间更长
@@ -172,6 +191,7 @@ python test_environment.py
 - `n_jobs`: 并行计算的进程数，-1表示使用所有CPU核心
 - `decay_rate`: 种群大小衰减率
 - `patience`: 早停耐心值，连续多少代无改进后停止
+- `random_seed`: 随机种子，默认 demo 固定为 42，便于不同电脑复现实例结果
 
 **[Preprocessing]部分**
 - `smooth_sigma`: 平滑系数
@@ -186,6 +206,7 @@ python test_environment.py
 - 反演出的隆升率场
 - 基于该隆升场模拟的地形
 - 与目标地形的对比图
+- 默认 demo 的 `demo_metrics.txt` 和真实/反演隆升场对比图
 - 隆升率分布图
 - 3D地形可视化
 - 优化过程记录

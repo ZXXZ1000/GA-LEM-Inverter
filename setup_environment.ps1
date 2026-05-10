@@ -18,7 +18,12 @@ param(
     [switch]$DryRun,
     [switch]$DiagnoseOnly,
     [switch]$InstallGit,
-    [string]$CondaRoot = ""
+    [string]$CondaRoot = "",
+    [string]$CondaSolver = "libmamba",
+    [string]$CondaRepodataFn = "current_repodata.json",
+    [string]$CondaRemoteConnectTimeoutSecs = "30",
+    [string]$CondaRemoteReadTimeoutSecs = "180",
+    [string]$ProjectDir = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -37,6 +42,22 @@ function Write-Info($Message) { Write-Host "[INFO] $Message" -ForegroundColor Bl
 function Write-Success($Message) { Write-Host "[SUCCESS] $Message" -ForegroundColor Green }
 function Write-WarningLine($Message) { Write-Host "[WARNING] $Message" -ForegroundColor Yellow }
 function Write-ErrorLine($Message) { Write-Host "[ERROR] $Message" -ForegroundColor Red }
+
+function Start-SetupLog {
+    $script:LogFile = Join-Path $ProjectRoot "setup_environment.log"
+    if (Test-Path $script:LogFile) {
+        Remove-Item -Force $script:LogFile
+    }
+    Start-Transcript -Path $script:LogFile -Force | Out-Null
+    Write-Info "Log file: $script:LogFile"
+}
+
+function Stop-SetupLog {
+    try {
+        Stop-Transcript | Out-Null
+    } catch {
+    }
+}
 
 function Get-CommandPath($Name) {
     $cmd = Get-Command $Name -ErrorAction SilentlyContinue
@@ -59,17 +80,20 @@ function Test-CommandPresent($Name, $Required = $false) {
 }
 
 function Get-CondaPath {
-    $cmd = Get-CommandPath "conda"
-    if ($cmd) { return $cmd }
-
     $candidates = @(
         (Join-Path $CondaRoot "Scripts\conda.exe"),
-        (Join-Path $CondaRoot "condabin\conda.bat"),
         (Join-Path $CondaRoot "bin\conda")
     )
     foreach ($candidate in $candidates) {
         if (Test-Path $candidate) { return $candidate }
     }
+
+    $cmd = Get-CommandPath "conda"
+    if ($cmd) { return $cmd }
+
+    $bat = Join-Path $CondaRoot "condabin\conda.bat"
+    if (Test-Path $bat) { return $bat }
+
     return $null
 }
 
@@ -90,13 +114,14 @@ function Install-GitIfRequested {
 function Install-MinicondaIfNeeded {
     $script:CondaBin = Get-CondaPath
     if ($script:CondaBin) {
-        Write-Info "Using conda: $script:CondaBin"
+        Write-Info "Using conda manager: $script:CondaBin"
+        Write-Info "Target packages are installed into: $EnvPath"
         return
     }
 
     $installer = "Miniconda3-latest-Windows-x86_64.exe"
     $url = "https://repo.anaconda.com/miniconda/$installer"
-    $installerPath = Join-Path $ScriptDir $installer
+    $installerPath = Join-Path $ProjectRoot $installer
 
     Write-Info "Miniconda not found. Downloading $installer"
     Invoke-WebRequest -Uri $url -OutFile $installerPath
@@ -126,13 +151,124 @@ function Install-MinicondaIfNeeded {
 
 function Invoke-Conda {
     param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments)
-    if ($script:CondaBin -like "*.bat") {
-        & cmd.exe /d /c "`"$script:CondaBin`" $($Arguments -join ' ')"
-    } else {
-        & $script:CondaBin @Arguments
+    & $script:CondaBin @Arguments
+    if ($LASTEXITCODE -eq 0) {
+        return
     }
+
+    $firstExitCode = $LASTEXITCODE
+    if (-not [string]::IsNullOrWhiteSpace($CondaSolver) -and ($Arguments -contains "--solver")) {
+        Write-WarningLine "conda failed with solver '$CondaSolver'; retrying with conda's default solver."
+        $filteredArgs = New-Object System.Collections.Generic.List[string]
+        for ($i = 0; $i -lt $Arguments.Count; $i++) {
+            if ($Arguments[$i] -eq "--solver") {
+                $i++
+                continue
+            }
+            $filteredArgs.Add($Arguments[$i])
+        }
+        & $script:CondaBin @filteredArgs
+        if ($LASTEXITCODE -eq 0) {
+            return
+        }
+    }
+
+    throw "conda failed with exit code $firstExitCode"
+}
+
+function Get-CondaHelpText {
+    param([string]$Command)
+    $output = & $script:CondaBin $Command --help 2>$null
+    if ($LASTEXITCODE -ne 0) { return "" }
+    return ($output -join "`n")
+}
+
+function Configure-CondaArgs {
+    $env:CONDA_REMOTE_CONNECT_TIMEOUT_SECS = $CondaRemoteConnectTimeoutSecs
+    $env:CONDA_REMOTE_READ_TIMEOUT_SECS = $CondaRemoteReadTimeoutSecs
+
+    $createHelp = Get-CondaHelpText "create"
+    $installHelp = Get-CondaHelpText "install"
+
+    $script:CondaCreateArgs = @("--override-channels", "-c", "conda-forge", "--strict-channel-priority")
+    $script:CondaInstallArgs = @("--override-channels", "-c", "conda-forge", "--strict-channel-priority")
+
+    if ($createHelp -match "--repodata-fn") {
+        $script:CondaCreateArgs += @("--repodata-fn", $CondaRepodataFn)
+    }
+    if ($installHelp -match "--repodata-fn") {
+        $script:CondaInstallArgs += @("--repodata-fn", $CondaRepodataFn)
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($CondaSolver) -and $createHelp -match "--solver") {
+        $script:CondaCreateArgs += @("--solver", $CondaSolver)
+    }
+    if (-not [string]::IsNullOrWhiteSpace($CondaSolver) -and $installHelp -match "--solver") {
+        $script:CondaInstallArgs += @("--solver", $CondaSolver)
+    }
+
+    if ($installHelp -match "--satisfied-skip-solve") {
+        $script:CondaInstallArgs += "--satisfied-skip-solve"
+    }
+
+    Write-Info "Conda create options: $($script:CondaCreateArgs -join ' ')"
+    Write-Info "Conda install options: $($script:CondaInstallArgs -join ' ')"
+    Write-Info "Conda network timeouts: connect=${CondaRemoteConnectTimeoutSecs}s read=${CondaRemoteReadTimeoutSecs}s"
+}
+
+function Resolve-ProjectRoot {
+    if (-not [string]::IsNullOrWhiteSpace($ProjectDir)) {
+        $candidate = $ProjectDir
+    } else {
+        $candidate = $PSScriptRoot
+        if ([string]::IsNullOrWhiteSpace($candidate)) {
+            $candidate = Split-Path -Parent $PSCommandPath
+        }
+        if ([string]::IsNullOrWhiteSpace($candidate)) {
+            $candidate = (Get-Location).Path
+        }
+    }
+
+    if (-not (Test-Path $candidate -PathType Container)) {
+        throw "Project directory does not exist: $candidate"
+    }
+
+    return (Resolve-Path $candidate).Path
+}
+
+function Assert-ProjectRoot {
+    $missing = @()
+    foreach ($file in @("main.py", "config.ini", "setup_environment.ps1")) {
+        if (-not (Test-Path (Join-Path $ProjectRoot $file) -PathType Leaf)) {
+            $missing += $file
+        }
+    }
+    if ($missing.Count -gt 0) {
+        throw "Project root check failed: $ProjectRoot. Missing required project files: $($missing -join ', '). Pass -ProjectDir C:\path\to\GA-LEM-Inverter if this script was launched from a wrapper."
+    }
+}
+
+function Assert-EnvPrefix {
+    if (-not (Test-Path $EnvPython -PathType Leaf)) {
+        throw "Expected environment Python was not found: $EnvPython. The environment must be created under the project root: $EnvPath"
+    }
+
+    $checkCode = @'
+import os
+import sys
+
+expected = os.path.normcase(os.path.realpath(os.path.abspath(sys.argv[1])))
+actual = os.path.normcase(os.path.realpath(os.path.abspath(sys.prefix)))
+
+if actual != expected:
+    print(f"Environment prefix mismatch: expected {expected}, got {actual}", file=sys.stderr)
+    sys.exit(1)
+
+print(f"Environment prefix verified: {sys.prefix}")
+'@
+    & $EnvPython -c $checkCode $EnvPath
     if ($LASTEXITCODE -ne 0) {
-        throw "conda failed with exit code $LASTEXITCODE"
+        throw "Environment prefix validation failed"
     }
 }
 
@@ -146,6 +282,8 @@ function Invoke-EnvPython {
 
 function Run-Diagnostics {
     Write-Info "Running host diagnostics"
+    Write-Info "Current dir: $((Get-Location).Path)"
+    Write-Info "Project dir: $ProjectRoot"
     Write-Info "PowerShell: $($PSVersionTable.PSVersion)"
     Write-Info "OS: $([System.Environment]::OSVersion.VersionString)"
     Write-Info "Architecture: $([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)"
@@ -159,6 +297,19 @@ function Run-Diagnostics {
         Write-Success "conda found: $conda"
     } else {
         Write-WarningLine "conda not found; this script can install Miniconda automatically."
+    }
+}
+
+function Diagnose-CondaManager {
+    Write-Info "Conda manager diagnostics"
+    $conda = Get-CondaPath
+    if ($conda) {
+        Write-Success "Preferred conda manager: $conda"
+        & $conda --version
+        Write-Info "Target environment prefix: $EnvPath"
+    } else {
+        Write-WarningLine "No conda manager found. Setup will install Miniconda to: $CondaRoot"
+        Write-Info "Target environment prefix after install: $EnvPath"
     }
 }
 
@@ -212,8 +363,11 @@ $PipPackages = @(
 )
 
 function Print-Plan {
-    Write-Info "Project dir: $ScriptDir"
+    Write-Info "Project dir: $ProjectRoot"
     Write-Info "Conda root: $CondaRoot"
+    Write-Info "Conda solver preference: $CondaSolver"
+    Write-Info "Conda repodata preference: $CondaRepodataFn"
+    Write-Info "Conda network timeouts: connect=${CondaRemoteConnectTimeoutSecs}s read=${CondaRemoteReadTimeoutSecs}s"
     Write-Info "Environment: $EnvPath"
     Write-Info "Recreate env: $ShouldRecreate"
     Write-Info "Jupyter kernel: $(-not $NoJupyter)"
@@ -221,6 +375,72 @@ function Print-Plan {
     $CondaPackages | ForEach-Object { Write-Host "  $_" }
     Write-Info "Pip packages:"
     $PipPackages | ForEach-Object { Write-Host "  $_" }
+}
+
+function Diagnose-ExistingEnvironment {
+    Write-Info "Project-local environment diagnostics"
+    if (-not (Test-Path $EnvPath -PathType Container)) {
+        Write-WarningLine "Environment directory does not exist yet: $EnvPath"
+        return
+    }
+
+    Write-Success "Environment directory exists: $EnvPath"
+    if (-not (Test-Path $EnvPython -PathType Leaf)) {
+        Write-ErrorLine "Environment Python is missing: $EnvPython"
+        return
+    }
+
+    $diagnoseCode = @'
+import importlib.metadata as md
+import os
+import sys
+
+expected = os.path.normcase(os.path.realpath(os.path.abspath(sys.argv[1])))
+actual = os.path.normcase(os.path.realpath(os.path.abspath(sys.prefix)))
+
+print(f"python_executable={sys.executable}")
+print(f"sys_prefix={sys.prefix}")
+print(f"expected_prefix={sys.argv[1]}")
+print(f"prefix_match={actual == expected}")
+
+checks = {
+    "numpy": "2.3.5",
+    "zarr": "2.18.7",
+    "xarray-simlab": "0.5.0",
+    "fastscape": "0.1.0",
+    "notebook": "7.5.6",
+    "ipykernel": "7.2.0",
+}
+ok = actual == expected
+for package, expected_version in checks.items():
+    try:
+        actual_version = md.version(package)
+    except md.PackageNotFoundError:
+        print(f"{package}=MISSING expected={expected_version}")
+        ok = False
+        continue
+    print(f"{package}={actual_version} expected={expected_version}")
+    if actual_version != expected_version:
+        ok = False
+
+try:
+    import numpy as np
+    import zarr
+    print(f"numpy_has_in1d={hasattr(np, 'in1d')}")
+    print(f"zarr_has_MemoryStore={hasattr(zarr, 'MemoryStore')}")
+    ok = ok and hasattr(np, "in1d") and hasattr(zarr, "MemoryStore")
+except Exception as exc:
+    print(f"compatibility_import_error={exc}")
+    ok = False
+
+sys.exit(0 if ok else 1)
+'@
+    & $EnvPython -c $diagnoseCode $EnvPath
+    if ($LASTEXITCODE -eq 0) {
+        Write-Success "Existing .conda environment matches critical checks"
+    } else {
+        Write-WarningLine "Existing .conda environment is missing or mismatched; setup will recreate/update it unless -DiagnoseOnly was used."
+    }
 }
 
 function Create-OrUpdateEnvironment {
@@ -232,16 +452,17 @@ function Create-OrUpdateEnvironment {
         Remove-Item -Recurse -Force $EnvPath
     }
 
-    $commonArgs = @("-p", $EnvPath, "-y", "--override-channels", "-c", "conda-forge", "--strict-channel-priority")
     if (-not (Test-Path $EnvPath)) {
         Write-Info "Creating conda environment at $EnvPath"
-        $args = @("create") + $commonArgs + $CondaPackages
+        $args = @("create", "-p", $EnvPath, "-y") + $script:CondaCreateArgs + $CondaPackages
         Invoke-Conda @args
     } else {
         Write-Info "Installing/updating conda packages in $EnvPath"
-        $args = @("install") + $commonArgs + $CondaPackages
+        $args = @("install", "-p", $EnvPath, "-y") + $script:CondaInstallArgs + $CondaPackages
         Invoke-Conda @args
     }
+
+    Assert-EnvPrefix
 
     Write-Info "Upgrading pip inside project environment"
     Invoke-EnvPython "-m" "pip" "install" "--upgrade" "pip>=24,<26"
@@ -249,6 +470,8 @@ function Create-OrUpdateEnvironment {
     Write-Info "Installing pinned pip packages"
     $pipArgs = @("-m", "pip", "install") + $PipPackages
     Invoke-EnvPython @pipArgs
+
+    Assert-EnvPrefix
 }
 
 function Register-JupyterKernel {
@@ -263,6 +486,7 @@ function Register-JupyterKernel {
 
 function Verify-Environment {
     Write-Info "Verifying imports and Fastscape runtime compatibility"
+    Assert-EnvPrefix
     $verifyCode = @'
 import importlib.metadata as md
 import numpy as np
@@ -326,7 +550,7 @@ except Exception as exc:
     print(f"scikit-opt=={md.version('scikit-opt')} (optional import warning: {exc})")
 print("Fastscape smoke test passed")
 '@
-    Push-Location $ScriptDir
+    Push-Location $ProjectRoot
     try {
         $verifyCode | & $EnvPython -
         if ($LASTEXITCODE -ne 0) {
@@ -337,33 +561,43 @@ print("Fastscape smoke test passed")
     }
 }
 
-$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-if ([string]::IsNullOrWhiteSpace($ScriptDir)) {
-    $ScriptDir = (Get-Location).Path
-}
-$EnvPath = Join-Path $ScriptDir $EnvDirName
+$ProjectRoot = Resolve-ProjectRoot
+Assert-ProjectRoot
+$EnvPath = Join-Path $ProjectRoot $EnvDirName
 $EnvPython = Join-Path $EnvPath "python.exe"
 $ShouldRecreate = -not $KeepExisting
 if ($Recreate) { $ShouldRecreate = $true }
 
-Run-Diagnostics
-Install-GitIfRequested
-Print-Plan
+try {
+    Start-SetupLog
+    Run-Diagnostics
+    Diagnose-CondaManager
+    Install-GitIfRequested
+    Print-Plan
+    Diagnose-ExistingEnvironment
 
-if ($DiagnoseOnly) {
-    Write-Success "Diagnosis completed; no environment changes made."
-    exit 0
+    if ($DiagnoseOnly) {
+        Write-Success "Diagnosis completed; no environment changes made."
+        Write-Info "Log file: $script:LogFile"
+        exit 0
+    }
+
+    if ($DryRun) {
+        Write-Success "Dry run completed; no changes made."
+        Write-Info "Log file: $script:LogFile"
+        exit 0
+    }
+
+    Install-MinicondaIfNeeded
+    Configure-CondaArgs
+    Create-OrUpdateEnvironment
+    Register-JupyterKernel
+    Verify-Environment
+
+    Write-Success "Environment setup completed."
+    Write-Info "Use this interpreter: $EnvPython"
+    Write-Info "Or activate with: conda activate $EnvPath"
+    Write-Info "Log file: $script:LogFile"
+} finally {
+    Stop-SetupLog
 }
-
-if ($DryRun) {
-    Write-Success "Dry run completed; no changes made."
-    exit 0
-}
-
-Install-MinicondaIfNeeded
-Create-OrUpdateEnvironment
-Register-JupyterKernel
-Verify-Environment
-
-Write-Success "Environment setup completed."
-Write-Info "Use this interpreter: $EnvPython"

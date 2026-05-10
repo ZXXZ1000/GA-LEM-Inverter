@@ -17,11 +17,17 @@ set -Eeuo pipefail
 PYTHON_VERSION="3.11"
 ENV_DIR_NAME=".conda"
 CONDA_ROOT="${CONDA_ROOT:-$HOME/miniconda3}"
+CONDA_SOLVER="${CONDA_SOLVER:-libmamba}"
+CONDA_REPODATA_FN="${CONDA_REPODATA_FN:-current_repodata.json}"
+CONDA_REMOTE_CONNECT_TIMEOUT_SECS="${CONDA_REMOTE_CONNECT_TIMEOUT_SECS:-30}"
+CONDA_REMOTE_READ_TIMEOUT_SECS="${CONDA_REMOTE_READ_TIMEOUT_SECS:-180}"
+PROJECT_DIR="${PROJECT_DIR:-}"
 RECREATE_ENV=1
 INSTALL_JUPYTER_KERNEL=1
 DRY_RUN=0
 DIAGNOSE_ONLY=0
 INSTALL_BASE_TOOLS=0
+LOG_FILE=""
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -34,6 +40,13 @@ print_success() { printf "%b[SUCCESS]%b %s\n" "$GREEN" "$NC" "$*"; }
 print_warning() { printf "%b[WARNING]%b %s\n" "$YELLOW" "$NC" "$*"; }
 print_error() { printf "%b[ERROR]%b %s\n" "$RED" "$NC" "$*" >&2; }
 
+setup_logging() {
+    LOG_FILE="$SCRIPT_DIR/setup_environment.log"
+    : > "$LOG_FILE"
+    exec > >(tee -a "$LOG_FILE") 2>&1
+    print_info "Log file: $LOG_FILE"
+}
+
 usage() {
     cat <<'EOF'
 Usage: bash setup_environment.sh [options]
@@ -45,10 +58,16 @@ Options:
   --dry-run           Print detected platform and pinned package plan only.
   --diagnose-only     Check host tools and print the package plan only.
   --install-base      Try to install missing host tools such as git, curl, and bash.
+  --project-dir PATH  Explicit project root. Use this when launching through wrappers.
   -h, --help          Show this help.
 
 Environment variables:
   CONDA_ROOT          Miniconda install directory. Defaults to "$HOME/miniconda3".
+  CONDA_SOLVER        Preferred conda solver when supported. Defaults to "libmamba".
+  CONDA_REPODATA_FN   Preferred conda repodata file when supported. Defaults to "current_repodata.json".
+  CONDA_REMOTE_CONNECT_TIMEOUT_SECS  Conda network connect timeout. Defaults to 30.
+  CONDA_REMOTE_READ_TIMEOUT_SECS     Conda network read timeout. Defaults to 180.
+  PROJECT_DIR         Explicit project root. Same effect as --project-dir.
 EOF
 }
 
@@ -73,6 +92,14 @@ parse_args() {
             --install-base)
                 INSTALL_BASE_TOOLS=1
                 ;;
+            --project-dir)
+                if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+                    print_error "--project-dir requires a path"
+                    exit 2
+                fi
+                PROJECT_DIR="$2"
+                shift
+                ;;
             -h|--help)
                 usage
                 exit 0
@@ -85,6 +112,57 @@ parse_args() {
         esac
         shift
     done
+}
+
+resolve_project_root() {
+    local candidate source dir target
+
+    if [ -n "$PROJECT_DIR" ]; then
+        candidate="$PROJECT_DIR"
+    else
+        source="${BASH_SOURCE[0]:-}"
+        if [ -z "$source" ] || [ "$source" = "-" ] || [ ! -e "$source" ]; then
+            print_error "Cannot determine project root from this launch mode."
+            print_error "Run from the cloned repository, or pass: --project-dir /path/to/GA-LEM-Inverter"
+            exit 1
+        fi
+
+        while [ -L "$source" ]; do
+            dir="$(cd -P "$(dirname "$source")" >/dev/null 2>&1 && pwd)"
+            target="$(readlink "$source")"
+            if [[ "$target" == /* ]]; then
+                source="$target"
+            else
+                source="$dir/$target"
+            fi
+        done
+        candidate="$(cd -P "$(dirname "$source")" >/dev/null 2>&1 && pwd)"
+    fi
+
+    if [ ! -d "$candidate" ]; then
+        print_error "Project directory does not exist: $candidate"
+        exit 1
+    fi
+
+    SCRIPT_DIR="$(cd "$candidate" >/dev/null 2>&1 && pwd -P)"
+}
+
+validate_project_root() {
+    local missing=()
+    local file
+
+    for file in main.py config.ini setup_environment.sh; do
+        if [ ! -f "$SCRIPT_DIR/$file" ]; then
+            missing+=("$file")
+        fi
+    done
+
+    if [ "${#missing[@]}" -gt 0 ]; then
+        print_error "Project root check failed: $SCRIPT_DIR"
+        print_error "Missing required project files: ${missing[*]}"
+        print_error "Pass --project-dir /path/to/GA-LEM-Inverter if this script was launched from a wrapper."
+        exit 1
+    fi
 }
 
 require_command() {
@@ -162,6 +240,8 @@ try_install_base_tools() {
 
 run_host_diagnostics() {
     print_info "Host diagnostics"
+    print_info "Current dir: $(pwd)"
+    print_info "Project dir: $SCRIPT_DIR"
     print_info "Shell: ${SHELL:-unknown}"
     print_info "uname: $(uname -a)"
     for tool in git bash curl pip python conda powershell pwsh winget.exe; do
@@ -171,6 +251,18 @@ run_host_diagnostics() {
             print_warning "$tool: not found"
         fi
     done
+}
+
+diagnose_conda_manager() {
+    print_info "Conda manager diagnostics"
+    if CONDA_BIN="$(find_conda)"; then
+        print_success "Preferred conda manager: $CONDA_BIN"
+        "$CONDA_BIN" --version || true
+        print_info "Target environment prefix: $ENV_PATH"
+    else
+        print_warning "No conda manager found. Setup will install Miniconda to: $CONDA_ROOT"
+        print_info "Target environment prefix after install: $ENV_PATH"
+    fi
 }
 
 detect_platform() {
@@ -246,11 +338,6 @@ miniconda_installer_name() {
 }
 
 find_conda() {
-    if command -v conda >/dev/null 2>&1; then
-        command -v conda
-        return 0
-    fi
-
     local candidates=(
         "$CONDA_ROOT/bin/conda"
         "$CONDA_ROOT/Scripts/conda.exe"
@@ -264,12 +351,18 @@ find_conda() {
         fi
     done
 
+    if command -v conda >/dev/null 2>&1; then
+        command -v conda
+        return 0
+    fi
+
     return 1
 }
 
 install_miniconda_if_needed() {
     if CONDA_BIN="$(find_conda)"; then
-        print_info "Using conda: $CONDA_BIN"
+        print_info "Using conda manager: $CONDA_BIN"
+        print_info "Target packages are installed into: $ENV_PATH"
         return 0
     fi
 
@@ -308,6 +401,69 @@ install_miniconda_if_needed() {
     print_success "Miniconda installed: $CONDA_BIN"
 }
 
+configure_conda_args() {
+    local create_help install_help
+    export CONDA_REMOTE_CONNECT_TIMEOUT_SECS
+    export CONDA_REMOTE_READ_TIMEOUT_SECS
+
+    create_help="$("$CONDA_BIN" create --help 2>/dev/null || true)"
+    install_help="$("$CONDA_BIN" install --help 2>/dev/null || true)"
+
+    CONDA_CREATE_ARGS=(--override-channels -c conda-forge --strict-channel-priority)
+    CONDA_INSTALL_ARGS=(--override-channels -c conda-forge --strict-channel-priority)
+
+    if printf "%s" "$create_help" | grep -q -- "--repodata-fn"; then
+        CONDA_CREATE_ARGS+=(--repodata-fn "$CONDA_REPODATA_FN")
+    fi
+    if printf "%s" "$install_help" | grep -q -- "--repodata-fn"; then
+        CONDA_INSTALL_ARGS+=(--repodata-fn "$CONDA_REPODATA_FN")
+    fi
+
+    if [ -n "$CONDA_SOLVER" ] && printf "%s" "$create_help" | grep -q -- "--solver"; then
+        CONDA_CREATE_ARGS+=(--solver "$CONDA_SOLVER")
+    fi
+    if [ -n "$CONDA_SOLVER" ] && printf "%s" "$install_help" | grep -q -- "--solver"; then
+        CONDA_INSTALL_ARGS+=(--solver "$CONDA_SOLVER")
+    fi
+
+    if printf "%s" "$install_help" | grep -q -- "--satisfied-skip-solve"; then
+        CONDA_INSTALL_ARGS+=(--satisfied-skip-solve)
+    fi
+
+    print_info "Conda create options: ${CONDA_CREATE_ARGS[*]}"
+    print_info "Conda install options: ${CONDA_INSTALL_ARGS[*]}"
+    print_info "Conda network timeouts: connect=${CONDA_REMOTE_CONNECT_TIMEOUT_SECS}s read=${CONDA_REMOTE_READ_TIMEOUT_SECS}s"
+}
+
+run_conda() {
+    local subcommand="$1"
+    shift
+
+    if "$CONDA_BIN" "$subcommand" "$@"; then
+        return 0
+    fi
+
+    if [ -n "$CONDA_SOLVER" ]; then
+        print_warning "conda $subcommand failed with solver '$CONDA_SOLVER'; retrying with conda's default solver."
+        local filtered=()
+        while [ "$#" -gt 0 ]; do
+            if [ "$1" = "--solver" ]; then
+                shift
+                if [ "$#" -gt 0 ]; then
+                    shift
+                fi
+                continue
+            fi
+            filtered+=("$1")
+            shift
+        done
+        "$CONDA_BIN" "$subcommand" "${filtered[@]}"
+        return $?
+    fi
+
+    return 1
+}
+
 set_env_paths() {
     ENV_PATH="$SCRIPT_DIR/$ENV_DIR_NAME"
     if [ "$PLATFORM" = "windows" ]; then
@@ -317,6 +473,28 @@ set_env_paths() {
         CONDA_ENV_PREFIX="$ENV_PATH"
         ENV_PYTHON="$ENV_PATH/bin/python"
     fi
+}
+
+assert_env_prefix() {
+    if [ ! -x "$ENV_PYTHON" ] && [ ! -f "$ENV_PYTHON" ]; then
+        print_error "Expected environment Python was not found: $ENV_PYTHON"
+        print_error "The environment must be created under the project root: $ENV_PATH"
+        exit 1
+    fi
+
+    "$ENV_PYTHON" - "$ENV_PATH" <<'PY'
+import os
+import sys
+
+expected = os.path.normcase(os.path.realpath(os.path.abspath(sys.argv[1])))
+actual = os.path.normcase(os.path.realpath(os.path.abspath(sys.prefix)))
+
+if actual != expected:
+    print(f"Environment prefix mismatch: expected {expected}, got {actual}", file=sys.stderr)
+    sys.exit(1)
+
+print(f"Environment prefix verified: {sys.prefix}")
+PY
 }
 
 is_target_env_active() {
@@ -393,6 +571,9 @@ print_plan() {
     print_info "Platform: $PLATFORM / $ARCH"
     print_info "Project dir: $SCRIPT_DIR"
     print_info "Conda root: $CONDA_ROOT"
+    print_info "Conda solver preference: $CONDA_SOLVER"
+    print_info "Conda repodata preference: $CONDA_REPODATA_FN"
+    print_info "Conda network timeouts: connect=${CONDA_REMOTE_CONNECT_TIMEOUT_SECS}s read=${CONDA_REMOTE_READ_TIMEOUT_SECS}s"
     print_info "Environment: $ENV_PATH"
     print_info "Conda prefix: $CONDA_ENV_PREFIX"
     print_info "Recreate env: $RECREATE_ENV"
@@ -401,6 +582,73 @@ print_plan() {
     printf "  %s\n" "${CONDA_PACKAGES[@]}"
     print_info "Pip packages:"
     printf "  %s\n" "${PIP_PACKAGES[@]}"
+}
+
+diagnose_existing_environment() {
+    print_info "Project-local environment diagnostics"
+    if [ ! -d "$ENV_PATH" ]; then
+        print_warning "Environment directory does not exist yet: $ENV_PATH"
+        return 0
+    fi
+
+    print_success "Environment directory exists: $ENV_PATH"
+    if [ ! -x "$ENV_PYTHON" ] && [ ! -f "$ENV_PYTHON" ]; then
+        print_error "Environment Python is missing: $ENV_PYTHON"
+        return 0
+    fi
+
+    "$ENV_PYTHON" - "$ENV_PATH" <<'PY'
+import importlib.metadata as md
+import os
+import sys
+
+expected = os.path.normcase(os.path.realpath(os.path.abspath(sys.argv[1])))
+actual = os.path.normcase(os.path.realpath(os.path.abspath(sys.prefix)))
+
+print(f"python_executable={sys.executable}")
+print(f"sys_prefix={sys.prefix}")
+print(f"expected_prefix={sys.argv[1]}")
+print(f"prefix_match={actual == expected}")
+
+checks = {
+    "numpy": "2.3.5",
+    "zarr": "2.18.7",
+    "xarray-simlab": "0.5.0",
+    "fastscape": "0.1.0",
+    "notebook": "7.5.6",
+    "ipykernel": "7.2.0",
+}
+ok = actual == expected
+for package, expected_version in checks.items():
+    try:
+        actual_version = md.version(package)
+    except md.PackageNotFoundError:
+        print(f"{package}=MISSING expected={expected_version}")
+        ok = False
+        continue
+    print(f"{package}={actual_version} expected={expected_version}")
+    if actual_version != expected_version:
+        ok = False
+
+try:
+    import numpy as np
+    import zarr
+    print(f"numpy_has_in1d={hasattr(np, 'in1d')}")
+    print(f"zarr_has_MemoryStore={hasattr(zarr, 'MemoryStore')}")
+    ok = ok and hasattr(np, "in1d") and hasattr(zarr, "MemoryStore")
+except Exception as exc:
+    print(f"compatibility_import_error={exc}")
+    ok = False
+
+sys.exit(0 if ok else 1)
+PY
+    local status=$?
+    if [ "$status" -eq 0 ]; then
+        print_success "Existing .conda environment matches critical checks"
+    else
+        print_warning "Existing .conda environment is missing or mismatched; setup will recreate/update it unless --diagnose-only was used."
+    fi
+    return 0
 }
 
 create_or_update_environment() {
@@ -415,19 +663,23 @@ create_or_update_environment() {
 
     if [ ! -d "$ENV_PATH" ]; then
         print_info "Creating conda environment at $ENV_PATH"
-        "$CONDA_BIN" create -p "$CONDA_ENV_PREFIX" -y --override-channels -c conda-forge \
-            --strict-channel-priority "${CONDA_PACKAGES[@]}"
+        run_conda create -p "$CONDA_ENV_PREFIX" -y \
+            "${CONDA_CREATE_ARGS[@]}" "${CONDA_PACKAGES[@]}"
     else
         print_info "Installing/updating conda packages in $ENV_PATH"
-        "$CONDA_BIN" install -p "$CONDA_ENV_PREFIX" -y --override-channels -c conda-forge \
-            --strict-channel-priority "${CONDA_PACKAGES[@]}"
+        run_conda install -p "$CONDA_ENV_PREFIX" -y \
+            "${CONDA_INSTALL_ARGS[@]}" "${CONDA_PACKAGES[@]}"
     fi
+
+    assert_env_prefix
 
     print_info "Upgrading pip"
     "$ENV_PYTHON" -m pip install --upgrade "pip>=24,<26"
 
     print_info "Installing pinned pip packages"
     "$ENV_PYTHON" -m pip install "${PIP_PACKAGES[@]}"
+
+    assert_env_prefix
 }
 
 register_jupyter_kernel() {
@@ -444,6 +696,7 @@ register_jupyter_kernel() {
 
 verify_environment() {
     print_info "Verifying imports and Fastscape runtime compatibility"
+    assert_env_prefix
     (
         cd "$SCRIPT_DIR"
         "$ENV_PYTHON" - <<'PY'
@@ -516,16 +769,21 @@ main() {
     parse_args "$@"
 
     require_command uname
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+    resolve_project_root
+    validate_project_root
+    setup_logging
 
     detect_platform
     set_env_paths
     run_host_diagnostics
+    diagnose_conda_manager
     try_install_base_tools
     print_plan
+    diagnose_existing_environment
 
     if [ "$DIAGNOSE_ONLY" -eq 1 ]; then
         print_success "Diagnosis completed; no environment changes made."
+        print_info "Log file: $LOG_FILE"
         exit 0
     fi
 
@@ -535,6 +793,7 @@ main() {
     fi
 
     install_miniconda_if_needed
+    configure_conda_args
     create_or_update_environment
     register_jupyter_kernel
     verify_environment
@@ -542,6 +801,7 @@ main() {
     print_success "Environment setup completed."
     print_info "Use: conda activate $ENV_PATH"
     print_info "Or:  $ENV_PYTHON test_environment.py"
+    print_info "Log file: $LOG_FILE"
 }
 
 main "$@"

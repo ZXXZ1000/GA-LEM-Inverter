@@ -15,21 +15,23 @@ def setup_plot_style():
     plt.rcParams['font.weight'] = 'bold'
     plt.rcParams['font.style'] = 'italic'
 
-def plot_comparison(data1: np.ndarray, data2: np.ndarray, 
-                   title1: str, title2: str, value1: str, value2: str, 
-                   cmap: str = 'viridis', figsize: Tuple[int, int] = (15, 10), 
-                   dpi: int = 300) -> plt.Figure:
+def plot_comparison(data1: np.ndarray, data2: np.ndarray,
+                   title1: str, title2: str, value1: str, value2: str,
+                   cmap: str = 'viridis', figsize: Tuple[int, int] = (15, 10),
+                   dpi: int = 300, shared_scale: bool = True) -> plt.Figure:
     """绘制两个数据集的对比图"""
     setup_plot_style()
-    
+
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize, dpi=dpi)
-    
-    # 获取data2的值范围
-    vmin = np.nanmin(data2)
-    vmax = np.nanmax(data2)
-    
-    # 绘制第一个数据集，使用data2的值范围
-    im1 = ax1.imshow(data1, cmap=cmap, origin='upper', vmin=vmin, vmax=vmax)
+
+    if shared_scale:
+        vmin1 = vmin2 = min(np.nanmin(data1), np.nanmin(data2))
+        vmax1 = vmax2 = max(np.nanmax(data1), np.nanmax(data2))
+    else:
+        vmin1, vmax1 = np.nanmin(data1), np.nanmax(data1)
+        vmin2, vmax2 = np.nanmin(data2), np.nanmax(data2)
+
+    im1 = ax1.imshow(data1, cmap=cmap, origin='upper', vmin=vmin1, vmax=vmax1)
     ax1.set_title(title1, fontsize=16, weight='bold', fontstyle='italic')
     ax1.set_xlabel('X', fontsize=14, weight='bold', fontstyle='italic')
     ax1.set_ylabel('Y', fontsize=14, weight='bold', fontstyle='italic')
@@ -40,7 +42,7 @@ def plot_comparison(data1: np.ndarray, data2: np.ndarray,
     cbar1.set_label(value1, fontsize=14, weight='bold', fontstyle='italic', labelpad=10)
     
     # 绘制第二个数据集
-    im2 = ax2.imshow(data2, cmap=cmap, origin='upper', vmin=vmin, vmax=vmax)
+    im2 = ax2.imshow(data2, cmap=cmap, origin='upper', vmin=vmin2, vmax=vmax2)
     ax2.set_title(title2, fontsize=16, weight='bold', fontstyle='italic')
     ax2.set_xlabel('X', fontsize=14, weight='bold', fontstyle='italic')
     ax2.set_ylabel('Y', fontsize=14, weight='bold', fontstyle='italic')
@@ -59,7 +61,7 @@ def plot_uplift_distribution(uplift_data: np.ndarray) -> plt.Figure:
     
     y_coords = np.arange(uplift_data.shape[0])
     x_coords = np.arange(uplift_data.shape[1])
-    uplift_values = uplift_data[:, :]/10
+    uplift_values = uplift_data[:, :]
 
     mean_uplift = np.mean(uplift_values, axis=0)
     std_uplift = np.std(uplift_values, axis=0)
@@ -72,7 +74,7 @@ def plot_uplift_distribution(uplift_data: np.ndarray) -> plt.Figure:
                      color='gray', alpha=0.2, label='Standard Deviation Range')
 
     ax1.set_xlabel('Y Coordinate', fontsize=14, weight='bold', fontstyle='italic')
-    ax1.set_ylabel('Uplift Rate (mm/y)', fontsize=14, weight='bold', 
+    ax1.set_ylabel('Uplift Rate (mm/yr)', fontsize=14, weight='bold',
                    fontstyle='italic', color='#B32626')
     ax1.set_title('Uplift Rate Distribution and 10Ma Total Uplift', 
                   fontsize=16, weight='bold', fontstyle='italic')
@@ -102,7 +104,7 @@ def plot_uplift_distribution_y(uplift_data: np.ndarray) -> plt.Figure:
     
     y_coords = np.arange(uplift_data.shape[0])
     x_coords = np.arange(uplift_data.shape[1])
-    uplift_values = uplift_data[:, :]/10
+    uplift_values = uplift_data[:, :]
 
     mean_uplift = np.mean(uplift_values, axis=1)
     std_uplift = np.std(uplift_values, axis=1)
@@ -115,7 +117,7 @@ def plot_uplift_distribution_y(uplift_data: np.ndarray) -> plt.Figure:
                         color='gray', alpha=0.2, label='Standard Deviation Range')
 
     ax1.set_xlabel('Y Coordinate', fontsize=14, weight='bold', fontstyle='italic')
-    ax1.set_ylabel('Uplift Rate (mm/y)', fontsize=14, weight='bold', 
+    ax1.set_ylabel('Uplift Rate (mm/yr)', fontsize=14, weight='bold',
                     fontstyle='italic', color='#B32626')
     ax1.set_title('Uplift Rate Distribution and 10Ma Total Uplift', 
                     fontsize=16, weight='bold', fontstyle='italic')

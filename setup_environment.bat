@@ -11,5 +11,12 @@ if %ERRORLEVEL% neq 0 (
     exit /b 1
 )
 
-powershell -NoProfile -ExecutionPolicy Bypass -File "%PS_SCRIPT%" %*
-exit /b %ERRORLEVEL%
+powershell -NoProfile -ExecutionPolicy Bypass -File "%PS_SCRIPT%" -ProjectDir "%SCRIPT_DIR%" %*
+set "SETUP_EXIT=%ERRORLEVEL%"
+if not "%SETUP_EXIT%"=="0" (
+    echo.
+    echo [ERROR] Environment setup failed. See "%SCRIPT_DIR%setup_environment.log".
+    echo Press any key to close this window.
+    pause >nul
+)
+exit /b %SETUP_EXIT%

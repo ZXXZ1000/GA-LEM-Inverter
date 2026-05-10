@@ -5,13 +5,25 @@ from fastscape.models import basic_model
 import logging
 import warnings
 
-def run_fastscape_model(k_sp, uplift, k_diff, x_size, y_size, spacing, boundary_status='fixed_value', area_exp=0.43, slope_exp=1, time_total=10e6):
+def run_fastscape_model(
+    k_sp,
+    uplift,
+    k_diff,
+    x_size,
+    y_size,
+    spacing,
+    boundary_status='fixed_value',
+    area_exp=0.43,
+    slope_exp=1,
+    time_total=10e6,
+    initial_topography_seed=42
+):
     """
     运行 fastscape 模型。
 
     参数:
     - k_sp: 侵蚀系数。
-    - uplift: 抬升速率。
+    - uplift: 抬升速率，单位 mm/yr。
     - k_diff: 扩散系数。
     - x_size: x 方向的网格大小。
     - y_size: y 方向的网格大小。
@@ -20,6 +32,7 @@ def run_fastscape_model(k_sp, uplift, k_diff, x_size, y_size, spacing, boundary_
     - area_exp: 面积指数。
     - slope_exp: 坡度指数。
     - time_total: 总模拟时间。
+    - initial_topography_seed: 初始随机地形种子。固定种子可让 GA 目标函数可复现。
 
     返回:
     - elevation: 模拟后的地形高程数据。
@@ -52,8 +65,8 @@ def run_fastscape_model(k_sp, uplift, k_diff, x_size, y_size, spacing, boundary_
                 'grid__shape': [y_size, x_size],
                 'grid__length': [y_size * spacing, x_size * spacing],
                 'boundary__status': boundary_status,
-                'uplift__rate': uplift * 10**(-4),
-                'init_topography__seed': None,
+                'uplift__rate': uplift * 10**(-3),
+                'init_topography__seed': initial_topography_seed,
                 'spl__k_coef': k_sp,
                 'spl__area_exp': area_exp,
                 'spl__slope_exp': slope_exp,

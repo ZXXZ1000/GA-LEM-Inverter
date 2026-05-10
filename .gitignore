@@ -8,6 +8,11 @@ AGENTS.md
 # Conda environment
 .conda/
 miniconda.sh
+setup_environment.log
+demo_outputs/
+synthetic_experiments/
+sensitivity_experiments/
+results/
 
 # Python cache and artifacts
 __pycache__/

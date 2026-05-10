@@ -97,9 +97,42 @@ def preprocess_terrain_data(dem_array, dem_profile, resample_ratio=None, resampl
 
     return matrix, spacing
 
+def _smooth_and_clip_uplift(interpolated_uplift, source_uplift, target_shape, low_res_shape):
+    """
+    对插值后的隆升场做轻量平滑，并把数值限制在低分辨率输入范围内。
+
+    GA 优化的是低分辨率控制点。如果直接把控制点硬插到全分辨率，
+    图上会出现不符合地质含义的孤立尖点；这里用网格放大倍数决定平滑强度。
+    """
+    source = np.asarray(source_uplift, dtype=np.float32)
+    result = np.asarray(interpolated_uplift, dtype=np.float32)
+
+    if np.ma.isMaskedArray(result):
+        result = result.filled(np.nan)
+
+    finite_source = source[np.isfinite(source)]
+    if finite_source.size == 0:
+        raise ValueError("隆升场输入没有有效数值")
+
+    fill_value = float(np.mean(finite_source))
+    result = np.nan_to_num(result, nan=fill_value, posinf=float(np.max(finite_source)), neginf=float(np.min(finite_source)))
+
+    scale_y = target_shape[0] / max(low_res_shape[0], 1)
+    scale_x = target_shape[1] / max(low_res_shape[1], 1)
+    sigma = max(0.0, min(scale_x, scale_y) / 2.0)
+    if sigma >= 0.75:
+        result = gaussian_filter(result, sigma=sigma)
+
+    return np.clip(result, float(np.min(finite_source)), float(np.max(finite_source))).astype(np.float32)
+
+
 def interpolate_uplift_cv(low_res_uplift, target_shape):
     """
-    使用Kriging方法将低分辨率uplift矩阵插值到高分辨率。
+    将低分辨率 uplift 矩阵插值到高分辨率。
+
+    默认 demo 和轻量反演通常只有 8x8 或 10x10 控制点。对这类小网格，
+    Kriging 会把控制点画成孤立尖点，因此优先使用三次插值并做轻量平滑。
+    较大网格仍尝试 Kriging，但同样会做平滑和范围裁剪。
 
     参数:
     - low_res_uplift: 低分辨率的uplift矩阵
@@ -108,12 +141,22 @@ def interpolate_uplift_cv(low_res_uplift, target_shape):
     返回:
     - high_res_uplift: 高分辨率的uplift矩阵
     """
+    low_res_uplift = np.asarray(low_res_uplift, dtype=np.float32)
+    if low_res_uplift.ndim != 2 or low_res_uplift.size == 0:
+        raise ValueError("低分辨率隆升场必须是非空二维数组")
+
+    low_res_shape = low_res_uplift.shape
+    if min(low_res_shape) <= 12:
+        logging.info(
+            f"低分辨率隆升网格较小，使用三次插值和平滑: {low_res_shape} -> {target_shape}"
+        )
+        return interpolate_uplift_cv1(low_res_uplift, target_shape)
+
     try:
         from pykrige.ok import OrdinaryKriging
         logging.info(f"开始Kriging插值: {low_res_uplift.shape} -> {target_shape}")
 
         # 创建网格坐标
-        low_res_shape = low_res_uplift.shape
         x = np.linspace(0, 1, low_res_shape[1])
         y = np.linspace(0, 1, low_res_shape[0])
         X, Y = np.meshgrid(x, y)
@@ -132,19 +175,16 @@ def interpolate_uplift_cv(low_res_uplift, target_shape):
             nlags=10,
             weight=True
         )
-        
+
         z_interpolated, _ = ok.execute("grid", new_x, new_y)
-        
-        # 应用中值滤波平滑结果（可选）
-        # z_interpolated = median_filter(z_interpolated, size=3)
-        
+
         logging.info("Kriging插值完成")
-        return z_interpolated
+        return _smooth_and_clip_uplift(z_interpolated, low_res_uplift, target_shape, low_res_shape)
 
     except Exception as e:
         logging.error(f"Kriging插值过程出错: {e}")
         logging.warning("回退到使用OpenCV双三次插值...")
-        return interpolate_uplift_cv(low_res_uplift, target_shape)
+        return interpolate_uplift_cv1(low_res_uplift, target_shape)
     
 def interpolate_uplift_cv1(input_data, target_shape):
     """
@@ -186,15 +226,26 @@ def interpolate_uplift_cv1(input_data, target_shape):
                 (target_shape[1], target_shape[0]),
                 interpolation=cv2.INTER_CUBIC
             )
-            return high_res_uplift
-            
+            return _smooth_and_clip_uplift(
+                high_res_uplift,
+                low_res_uplift,
+                target_shape,
+                low_res_uplift.shape
+            )
+
         except Exception as e:
             logging.warning(f"双三次插值失败，尝试双线性插值: {e}")
             # 回退到双线性插值
-            return cv2.resize(
+            high_res_uplift = cv2.resize(
                 low_res_uplift,
                 (target_shape[1], target_shape[0]),
                 interpolation=cv2.INTER_LINEAR
+            )
+            return _smooth_and_clip_uplift(
+                high_res_uplift,
+                low_res_uplift,
+                target_shape,
+                low_res_uplift.shape
             )
             
     except Exception as e:

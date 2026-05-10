@@ -12,8 +12,12 @@ import logging
 import os
 import time
 import json
+import warnings
 from datetime import datetime
 from typing import Tuple, Dict, Optional
+
+warnings.filterwarnings("ignore", message="dropping variables using `drop` is deprecated")
+warnings.filterwarnings("ignore", message="This figure includes Axes that are not compatible with tight_layout")
 
 # Import your existing modules
 from model_runner import run_fastscape_model
@@ -29,46 +33,80 @@ class SyntheticExperiment:
     def __init__(self, config_path: str = None):
         """
         初始化实验设置
-        
+
         参数:
         - config_path: 配置文件路径，如果为None则使用默认配置
         """
-        # 设置默认配置
+        # 默认配置用于“一键轻量验证”：用户直接运行
+        #   python run_synthetic_experiment.py
+        # 就能快速看到合成地形、反演隆升场、适应度历史和指标文件。
+        #
+        # 如果要做正式实验，通常只需要改下面几类参数：
+        # 1. experiment.shape：把 (64, 64) 改成 (100, 100) 或更高分辨率。
+        # 2. experiment.patterns：把 ['simple'] 改成 ['simple', 'medium', 'complex']。
+        # 3. ga_params.pop / max_iter：把 2 / 1 提高到 50-100 / 100-200。
+        # 4. ga_params.n_jobs：按 CPU 核心数调整，-1 表示使用所有核心。
+        # 5. fitness.use_lpips：轻量 demo 设为 False；正式论文级实验可设为 True。
         self.config = {
             'experiment': {
-                'shape': (100, 100),
-                'patterns': ['simple', 'medium', 'complex'],
-                'scale_factor': 5,
-                'output_base_dir': 'synthetic_experiments'
+                # 固定随机种子，保证 demo 在不同电脑上首次运行结果相近。
+                'random_seed': 42,
+                # 合成 DEM 的网格大小。默认 64x64 是为了满足地形特征提取的最小尺寸。
+                'shape': (64, 64),
+                # 默认只跑 simple，确保首次运行不会过慢。
+                'patterns': ['simple'],
+                # 降维因子；64/8=8，因此 GA 只需要优化 8x8 个变量。
+                'scale_factor': 8,
+                # 输出目录。每次运行会在该目录下生成带时间戳的子目录。
+                'output_base_dir': 'demo_outputs/synthetic_experiments'
             },
             'ga_params': {
-                'pop': 100,  # 增大种群数
-                'max_iter': 200,
-                'prob_cross': 0.8,  # 调整交叉概率
+                # 种群大小。demo 用 2；正式实验建议 50-100。
+                'pop': 2,
+                # 最大迭代次数。demo 用 1；正式实验建议 100-200。
+                'max_iter': 1,
+                # 交叉概率，控制父代组合生成新个体的比例。
+                'prob_cross': 0.8,
+                # 变异概率，控制随机扰动强度。
                 'prob_mut': 0.05,
+                # 隆升率搜索下界和上界，单位 mm/yr。
                 'lb': 3,
                 'ub': 12,
-                'decay_rate': 0.97,  # 调整衰减率
-                'min_size_pop': 30,  # 调整最小种群数
-                'patience': 60  # 调整早停步数
+                # 种群衰减率。demo 不衰减；正式实验可用 0.95-0.98。
+                'decay_rate': 1.0,
+                # 最小种群数，不能大于 pop。
+                'min_size_pop': 2,
+                # 早停耐心值：连续多少代没有改进后停止。
+                'patience': 1,
+                # 并行任务数。demo 固定 1，避免 Windows 首次运行多进程开销。
+                'n_jobs': 1
             },
             'model_params': {
+                # Fastscape 模型参数。demo 中 total time 较小，保证运行快速。
                 'k_sp_base': 6.92e-6,
                 'k_sp_fault': 2e-5,
                 'd_diff': 19.2,
                 'boundary_status': 'fixed_value',
                 'area_exp': 0.43,
                 'slope_exp': 1,
-                'time_total': 10e6,
+                'time_total': 1e4,
                 'spacing': 900
+            },
+            'fitness': {
+                # False 表示使用传统地形相似性指标，避免首次 demo 加载 LPIPS 深度模型。
+                # 正式实验如果要复现实验设计中的感知相似性，可改为 True。
+                'use_lpips': False
             }
         }
-        
+
         # 如果提供了配置文件，则加载它
         if config_path and os.path.exists(config_path):
             with open(config_path, 'r') as f:
                 loaded_config = json.load(f)
-                self.config.update(loaded_config)
+                self._deep_update(self.config, loaded_config)
+
+        np.random.seed(int(self.config['experiment'].get('random_seed', 42)))
+        self.config['ga_params']['random_seed'] = int(self.config['experiment'].get('random_seed', 42))
 
         # 创建输出目录
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -84,6 +122,15 @@ class SyntheticExperiment:
         # 保存配置
         with open(os.path.join(self.base_output_dir, 'config.json'), 'w') as f:
             json.dump(self.config, f, indent=4)
+
+    def _deep_update(self, base: Dict, updates: Dict) -> Dict:
+        """递归更新配置，避免外部 JSON 只改一项时覆盖整个配置段。"""
+        for key, value in updates.items():
+            if isinstance(value, dict) and isinstance(base.get(key), dict):
+                self._deep_update(base[key], value)
+            else:
+                base[key] = value
+        return base
 
     def setup_logging(self):
         """配置日志系统"""
@@ -174,7 +221,8 @@ class SyntheticExperiment:
                     matrix1=target_dem,
                     matrix2=generated_elevation,
                     resolution=model_params['spacing'],
-                    smooth_radius=2  # 调整平滑半径
+                    smooth_radius=2,  # 调整平滑半径
+                    use_lpips=self.config.get('fitness', {}).get('use_lpips', True)
                 )
                 
                 return 1 - similarity
@@ -322,8 +370,8 @@ class SyntheticExperiment:
                 ORIGINAL_SHAPE=shape,
                 ga_params=self.config['ga_params'],
                 model_params=model_params,
-                n_jobs=12,  # 按核心数或线程数（最大线程数填-1）调整
-                run_mode='cached'
+                n_jobs=self.config['ga_params'].get('n_jobs', 1),
+                run_mode=None
             )
             inversion_time = time.time() - start_time
             logging.info(f"GA inversion completed in {inversion_time:.2f} seconds")
@@ -415,12 +463,14 @@ class SyntheticExperiment:
         # 创建分析器实例并生成分析图
         try:
             analyzer = ResultAnalyzer(self.base_output_dir)
+            analyzer.patterns = list(self.config['experiment']['patterns'])
             # 加载所有模式的数据
             all_data = analyzer.load_all_patterns_data()
             # 创建综合图
             analyzer.create_composite_figures()
             # 生成比较分析图
-            analyzer.plot_comparative_analysis(all_data)
+            if len(analyzer.patterns) > 1:
+                analyzer.plot_comparative_analysis(all_data)
             logging.info("Analysis figures generated successfully")
         except Exception as e:
             logging.error(f"Error generating analysis figures: {e}")
@@ -450,6 +500,7 @@ class SyntheticExperiment:
 def main():
     """主函数"""
     try:
+        print("开始运行轻量合成地形 demo。正式实验参数请查看 run_synthetic_experiment.py 顶部默认配置注释。")
         # 创建实验实例
         experiment = SyntheticExperiment()
         

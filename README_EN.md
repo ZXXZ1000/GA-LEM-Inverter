@@ -33,6 +33,28 @@ bash setup_environment.sh --diagnose-only
 powershell -ExecutionPolicy Bypass -File .\setup_environment.ps1 -DiagnoseOnly
 ```
 
+The scripts always target the project-local `.conda` directory. They may reuse
+an existing base/system conda executable as the package manager, but every conda
+operation is run with `-p <repo>/.conda`, followed by a `sys.prefix` check.
+
+## Run the Built-In Demo
+
+The repository includes a lightweight DEM, fault shapefile, and study-area shapefile. `config.ini` already points to these demo files, so after installation you can run:
+
+```bash
+python main.py
+```
+
+Results are written to `demo_outputs/Expt_timestamp/`, including logs, DEM figures, erosion coefficient field, uplift field, optimization history, final simulated terrain, and comparison plots. The default demo also writes `demo_metrics.txt` and `demo_true_vs_inverted_uplift.png` so users can check the recovered uplift against the built-in truth field and the simulated terrain against the target terrain.
+
+The synthetic experiment is also configured as a small default demo:
+
+```bash
+python run_synthetic_experiment.py
+```
+
+It writes synthetic DEMs, true/inverted uplift fields, fitness history, and metrics under `demo_outputs/synthetic_experiments/`. For full experiments, increase the grid size, population, and iteration count in `run_synthetic_experiment.py`.
+
 ## Three Operation Modes
 
 ### 1. Synthetic Terrain Experiment
@@ -49,9 +71,11 @@ Synthetic terrain experiments are used to test algorithm performance, using arti
    python run_synthetic_experiment.py
    ```
 
+   By default this runs a lightweight `simple` demo. For full experiments, adjust the commented configuration block at the top of `run_synthetic_experiment.py`.
+
 #### Main Parameters (can be modified in run_synthetic_experiment.py):
 
-- `shape`: Terrain grid size, default (100, 100)
+- `shape`: Terrain grid size, default demo is (64, 64); full experiments can use (100, 100) or higher
 
 - `patterns`: Uplift patterns to test, options are 'simple', 'medium', 'complex'
 
@@ -115,7 +139,7 @@ Real terrain analysis uses actual DEM data to invert for uplift fields.
 
 #### Steps to Run:
 
-1. Prepare experimental data according to the config.ini file
+1. The default `config.ini` already points to the built-in demo data. For real studies, replace the DEM, fault, and study-area paths.
 
 2. Run:
 
@@ -128,8 +152,8 @@ Real terrain analysis uses actual DEM data to invert for uplift fields.
 **[Paths] Section**
 
 - `terrain_path`: DEM file path (.tif format supported)
-- `fault_shp_path`: Fault shapefile path
-- `study_area_shp_path`: Study area shapefile path
+- `fault_shp_path`: Fault shapefile path; optional. If omitted, a uniform erosion coefficient field is used.
+- `study_area_shp_path`: Study area shapefile path; optional. If omitted, the full DEM is used without rotation.
 - `output_path`: Results output directory
 
 **[Model] Section**
@@ -138,9 +162,9 @@ Real terrain analysis uses actual DEM data to invert for uplift fields.
 - `ksp_fault`: Fault zone erosion coefficient, default 2e-5
 - `d_diff_value`: Hillslope diffusion coefficient, default 19.2
 - `boundary_status`: Boundary condition, typically "fixed_value"
-- `area_exp`: Area exponent, default 0.43
+- `area_exp`: Area exponent, default 0.42
 - `slope_exp`: Slope exponent, default 1.0
-- `time_total`: Total simulation time (years), based on the geological history of the study area, typically millions to tens of millions of years
+- `time_total`: Total simulation time (years), default demo value is 2e5; reset it for real studies based on the geological history of the study area
 
 **[GeneticAlgorithm] Section**
 
@@ -152,6 +176,7 @@ Real terrain analysis uses actual DEM data to invert for uplift fields.
 - `n_jobs`: Number of parallel processes, -1 for all CPU cores
 - `decay_rate`: Population size decay rate
 - `patience`: Early stopping patience, stops after this many generations without improvement
+- `random_seed`: Random seed, fixed to 42 in the default demo for reproducible first-run results
 
 **[Preprocessing] Section**
 
@@ -169,6 +194,7 @@ Results will be saved in the specified output directory, including:
 - Inverted uplift rate field
 - Simulated terrain based on the inverted uplift field
 - Comparison with target terrain
+- Default demo metrics and true-vs-inverted uplift comparison
 - Uplift rate distribution plots
 - 3D terrain visualization
 - Optimization process records

@@ -344,7 +344,16 @@ def calculate_shp_rotation_angle(shp_path: str) -> float:
             # 计算各边的长度和方向
             edges = np.diff(coords, axis=0)
             lengths = np.sqrt(np.sum(edges**2, axis=1))
-            
+
+            # 正方形或近正方形研究区没有稳定的“长轴”方向。
+            # demo_study_area 就是这种情况，强行取某一条边会得到任意的 90° 旋转。
+            # 这里直接返回 0°，避免默认 demo 做无意义旋转。
+            min_length = np.min(lengths)
+            max_length = np.max(lengths)
+            if min_length > 0 and max_length / min_length < 1.05:
+                logging.info("研究区近似正方形，跳过主方向旋转")
+                return 0.0
+
             # 找出最长边
             longest_edge = edges[np.argmax(lengths)]
             

@@ -12,6 +12,7 @@ from typing import Dict, Any, Optional
 import warnings
 from datetime import datetime
 import sys
+from scipy.stats import pearsonr, spearmanr
 # 过滤所有警告
 warnings.filterwarnings('ignore')
 # 特定警告过滤
@@ -80,11 +81,11 @@ def setup_file_logging(output_path):
 
 # 将目标函数定义在全局作用域
 
-def create_objective_function(resampled_dem, LOW_RES_SHAPE, ORIGINAL_SHAPE, 
-                           Ksp, D_DIFF, row, col, spacing, time_step_num, 
-                           total_simulation_time, terrain_resolution, 
+def create_objective_function(resampled_dem, LOW_RES_SHAPE, ORIGINAL_SHAPE,
+                           Ksp, D_DIFF, row, col, spacing, time_step_num,
+                           total_simulation_time, terrain_resolution,
                            feature_smooth_radius, boundary_status='fixed_value',
-                           area_exp=0.43, slope_exp=1):
+                           area_exp=0.43, slope_exp=1, use_lpips=True):
     """创建优化目标函数"""
     def objective_function(uplift_vector):
         try:
@@ -113,7 +114,8 @@ def create_objective_function(resampled_dem, LOW_RES_SHAPE, ORIGINAL_SHAPE,
                 matrix1=resampled_dem,
                 matrix2=generated_elevation,
                 resolution=terrain_resolution,
-                smooth_radius=feature_smooth_radius
+                smooth_radius=feature_smooth_radius,
+                use_lpips=use_lpips
             )
             
             return 1 - similarity  # 最小化不相似度
@@ -155,7 +157,7 @@ def verify_config(config: configparser.ConfigParser) -> bool:
     """验证配置文件的完整性"""
     required_sections = ['Paths', 'Model', 'GeneticAlgorithm', 'Preprocessing']
     required_params = {
-        'Paths': ['terrain_path', 'fault_shp_path', 'study_area_shp_path', 'output_path'],
+        'Paths': ['terrain_path', 'output_path'],
         'Model': ['k_sp_value', 'ksp_fault', 'd_diff_value', 'boundary_status', 
                  'area_exp', 'slope_exp', 'time_total'],
         'GeneticAlgorithm': ['ga_pop_size', 'ga_max_iter', 'ga_prob_cross', 
@@ -274,6 +276,42 @@ def fill_Nan(dem_array):
     
     return filled_array
 
+def resolve_optional_file_path(path_value: str, file_type: str) -> Optional[str]:
+    """
+    读取可选输入文件路径。
+
+    配置里把路径留空、写 none/null/skip/false 时，程序会跳过对应功能。
+    这让 demo 可以只靠 DEM 跑通；正式实验需要断层或研究区约束时，再把
+    对应 shapefile 路径填回 config.ini。
+    """
+    raw_path = (path_value or '').split(';')[0].strip()
+    if raw_path.lower() in ('', 'none', 'null', 'skip', 'false', '0'):
+        logging.info(f"{file_type} 未配置，跳过该输入")
+        return None
+
+    verified_path = verify_file_path(raw_path, file_type)
+    if verified_path is None:
+        logging.warning(f"{file_type} 无法读取，跳过该输入: {raw_path}")
+        return None
+
+    return verified_path
+
+def create_uniform_erosion_field(shape, base_k_sp, border_width=2):
+    """
+    创建无断层约束时使用的均一侵蚀系数场。
+
+    边界仍设为 0，以满足 Fastscape 固定边界和 verify_erosion_field 的检查。
+    """
+    row, col = shape
+    ksp = np.ones((row, col), dtype=np.float64) * base_k_sp
+    safe_border = min(border_width, max(row // 2, 0), max(col // 2, 0))
+    if safe_border > 0:
+        ksp[:safe_border, :] = 0
+        ksp[-safe_border:, :] = 0
+        ksp[:, :safe_border] = 0
+        ksp[:, -safe_border:] = 0
+    return ksp
+
 def main():
     """主程序入口"""
     try:
@@ -291,6 +329,10 @@ def main():
             
         config = load_config(config_path)
         logging.info("配置文件加载完成")
+
+        random_seed = config.getint('GeneticAlgorithm', 'random_seed', fallback=42)
+        np.random.seed(random_seed)
+        logging.info(f"随机种子已固定: {random_seed}")
 
         # 3. 创建输出目录
         timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
@@ -314,39 +356,57 @@ def main():
         #setup_logging(output_path)
         logging.info("开始优化过程")
 
-        # 验证输入文件路径
+        # 验证输入文件路径。只有 DEM 是必需项；断层和研究区 shapefile 可选。
         terrain_path = verify_file_path(config['Paths']['terrain_path'], '地形栅格文件')
-        fault_shp_path = verify_file_path(config['Paths']['fault_shp_path'], '断层 Shapefile')
-        study_area_shp_path = verify_file_path(config['Paths']['study_area_shp_path'], '研究区域 Shapefile')
+        fault_shp_path = resolve_optional_file_path(
+            config['Paths'].get('fault_shp_path', ''),
+            '断层 Shapefile'
+        )
+        study_area_shp_path = resolve_optional_file_path(
+            config['Paths'].get('study_area_shp_path', ''),
+            '研究区域 Shapefile'
+        )
 
-        if None in (terrain_path, fault_shp_path, study_area_shp_path):
-            logging.error("一个或多个输入文件路径无效")
+        if terrain_path is None:
+            logging.error("地形栅格文件无效，无法继续")
             return
+        config['Paths']['terrain_path'] = terrain_path
+        config['Paths']['fault_shp_path'] = fault_shp_path or ''
+        config['Paths']['study_area_shp_path'] = study_area_shp_path or ''
 
         # 检查并统一投影坐标系 (保持这部分)
         logging.info("Step 2: 检查和统一投影坐标系")
         target_crs = config['Preprocessing']['target_crs'] # 从配置文件读取 target_crs
         config = reproject_files_to_geographic(config, target_crs=target_crs) # 传递 target_crs
         terrain_path = config['Paths']['terrain_path']
-        fault_shp_path = config['Paths']['fault_shp_path']
-        study_area_shp_path = config['Paths']['study_area_shp_path']
+        fault_shp_path = config['Paths'].get('fault_shp_path', '').strip() or None
+        study_area_shp_path = config['Paths'].get('study_area_shp_path', '').strip() or None
 
-        # 1. 数据加载 (加载 *未旋转的* DEM 和 Shapefiles)
+        # 1. 数据加载。研究区 shapefile 存在时裁剪 DEM；留空时使用 DEM 全域。
         logging.info("Step 1: 数据加载")
         ratio = config.getfloat('Preprocessing', 'ratio')
-        # 加载DEM数据，不进行旋转
         dem_data, dem_profile = load_dem_data(
             file_path=terrain_path,
             study_area_shp_path=study_area_shp_path,
             ratio=ratio
         )
 
-        # 读取 shapefiles
-        study_area = read_shapefile(study_area_shp_path)
-        fault_lines = read_shapefile(fault_shp_path)
+        if study_area_shp_path:
+            study_area = read_shapefile(study_area_shp_path)
+            logging.info(f"研究区 Shapefile 已加载，要素数量: {len(study_area)}")
+            rotation_angle = calculate_shp_rotation_angle(study_area_shp_path)
+        else:
+            study_area = None
+            rotation_angle = 0.0
+            logging.info("未配置研究区 Shapefile，使用 DEM 全域且不旋转")
 
-        # 计算旋转角度 (基于 study_area shapefile)
-        rotation_angle = calculate_shp_rotation_angle(study_area_shp_path)
+        if fault_shp_path:
+            fault_lines = read_shapefile(fault_shp_path)
+            logging.info(f"断层 Shapefile 已加载，要素数量: {len(fault_lines)}")
+        else:
+            fault_lines = None
+            logging.info("未配置断层 Shapefile，将使用均一侵蚀系数场")
+
         print(f"Calculated rotation angle: {rotation_angle:.2f}°")
 
 
@@ -367,16 +427,25 @@ def main():
         k_sp_value = config.getfloat('Model', 'k_sp_value')
         ksp_fault = config.getfloat('Model', 'ksp_fault')
 
-        #  创建 erosion field *在原始 DEM 空间* (rotation_angle=0)
-        Ksp = create_erosion_field(
-            shape=ORIGINAL_SHAPE,
-            base_k_sp=k_sp_value,
-            fault_k_sp=ksp_fault,
-            fault_shp_path=fault_shp_path,
-            study_area_shp_path=study_area_shp_path,
-            rotation_angle = rotation_angle,
-            border_width=2
-        )
+        # 创建 erosion field：有断层和研究区时叠加断层弱抗性带，否则使用均一场。
+        if fault_shp_path and study_area_shp_path:
+            Ksp = create_erosion_field(
+                shape=ORIGINAL_SHAPE,
+                base_k_sp=k_sp_value,
+                fault_k_sp=ksp_fault,
+                fault_shp_path=fault_shp_path,
+                study_area_shp_path=study_area_shp_path,
+                rotation_angle=rotation_angle,
+                border_width=2
+            )
+            logging.info("已根据断层 Shapefile 创建非均一侵蚀系数场")
+        else:
+            Ksp = create_uniform_erosion_field(
+                shape=ORIGINAL_SHAPE,
+                base_k_sp=k_sp_value,
+                border_width=2
+            )
+            logging.info("已创建均一侵蚀系数场")
 
         if not verify_erosion_field(Ksp, shape=ORIGINAL_SHAPE):
             logging.error("侵蚀系数场验证失败")
@@ -476,6 +545,7 @@ def main():
         total_simulation_time = config.getfloat('Model', 'time_total')
         terrain_resolution = spacing # 可以添加到config文件中
         feature_smooth_radius = 2  # 可以添加到config文件中
+        use_lpips = config.getboolean('Fitness', 'use_lpips', fallback=True)
 
         ga_params = {
             'pop': config.getint('GeneticAlgorithm', 'ga_pop_size'),
@@ -486,7 +556,8 @@ def main():
             'ub': config.getfloat('GeneticAlgorithm', 'ub'),
             'decay_rate': config.getfloat('GeneticAlgorithm', 'decay_rate'),
             'min_size_pop': config.getint('GeneticAlgorithm', 'min_size_pop'),
-            'patience': config.getint('GeneticAlgorithm', 'patience')
+            'patience': config.getint('GeneticAlgorithm', 'patience'),
+            'random_seed': random_seed
         }
 
         model_params = {
@@ -512,7 +583,8 @@ def main():
             time_step_num=time_step_num,
             total_simulation_time=total_simulation_time,
             terrain_resolution=terrain_resolution,
-            feature_smooth_radius=feature_smooth_radius
+            feature_smooth_radius=feature_smooth_radius,
+            use_lpips=use_lpips
         )
 
         # 显示原始DEM
@@ -615,16 +687,63 @@ def main():
 
             # 绘制隆升率对比图
             plot_comparison(
-                data1=best_low_res_uplift/10,
-                data2=best_full_res_uplift/10,
+                data1=best_low_res_uplift,
+                data2=best_full_res_uplift,
                 title1='Best Low Resolution Uplift',
                 title2='Best Full Resolution Uplift',
-                value1='Uplift Rate (mm/y)',
-                value2='Uplift Rate (mm/y)',
+                value1='Uplift Rate (mm/yr)',
+                value2='Uplift Rate (mm/yr)',
                 cmap='RdBu_r'
             )
             plt.savefig(os.path.join(output_path, 'uplift_comparison.png'))
             plt.close()
+
+            true_uplift_path = os.path.join(
+                os.path.dirname(config['Paths']['terrain_path']),
+                'demo_true_uplift.npy'
+            )
+            demo_metrics = {}
+            if os.path.exists(true_uplift_path):
+                try:
+                    true_uplift = np.load(true_uplift_path)
+                    if true_uplift.shape == best_full_res_uplift.shape:
+                        uplift_pearson = pearsonr(
+                            true_uplift.ravel(),
+                            best_full_res_uplift.ravel()
+                        ).statistic
+                        uplift_spearman = spearmanr(
+                            true_uplift.ravel(),
+                            best_full_res_uplift.ravel()
+                        ).statistic
+                        uplift_rmse = float(np.sqrt(np.mean((true_uplift - best_full_res_uplift) ** 2)))
+                        demo_metrics.update({
+                            'uplift_pearson': float(uplift_pearson),
+                            'uplift_spearman': float(uplift_spearman),
+                            'uplift_rmse': uplift_rmse
+                        })
+                        logging.info(
+                            "Demo uplift metrics: "
+                            f"Pearson={uplift_pearson:.4f}, "
+                            f"Spearman={uplift_spearman:.4f}, RMSE={uplift_rmse:.4f}"
+                        )
+                        plot_comparison(
+                            data1=true_uplift,
+                            data2=best_full_res_uplift,
+                            title1='Demo True Uplift',
+                            title2='Inverted Uplift',
+                            value1='Uplift Rate (mm/yr)',
+                            value2='Uplift Rate (mm/yr)',
+                            cmap='RdBu_r'
+                        )
+                        plt.savefig(os.path.join(output_path, 'demo_true_vs_inverted_uplift.png'))
+                        plt.close()
+                    else:
+                        logging.warning(
+                            f"跳过 demo 真值 uplift 对比：形状不一致 "
+                            f"{true_uplift.shape} vs {best_full_res_uplift.shape}"
+                        )
+                except Exception as e:
+                    logging.warning(f"读取 demo 真值 uplift 失败，跳过对比: {e}")
 
             # 生成最终地形
             final_elevation = run_fastscape_model(
@@ -641,6 +760,24 @@ def main():
             )
 
             # 绘制地形对比图
+            terrain_pearson = pearsonr(resampled_dem.ravel(), final_elevation.ravel()).statistic
+            terrain_spearman = spearmanr(resampled_dem.ravel(), final_elevation.ravel()).statistic
+            terrain_rmse = float(np.sqrt(np.mean((resampled_dem - final_elevation) ** 2)))
+            demo_metrics.update({
+                'terrain_pearson': float(terrain_pearson),
+                'terrain_spearman': float(terrain_spearman),
+                'terrain_rmse': terrain_rmse
+            })
+            logging.info(
+                "Terrain metrics: "
+                f"Pearson={terrain_pearson:.4f}, "
+                f"Spearman={terrain_spearman:.4f}, RMSE={terrain_rmse:.4f}"
+            )
+
+            with open(os.path.join(output_path, 'demo_metrics.txt'), 'w') as metrics_file:
+                for key, value in demo_metrics.items():
+                    metrics_file.write(f"{key} = {value:.6f}\n")
+
             plot_comparison(
                 data1=final_elevation,
                 data2=resampled_dem, #  注意这里对比的是 *旋转后且重采样* 的 DEM (resampled_dem)
@@ -648,9 +785,23 @@ def main():
                 title2='Target Landscape',
                 value1='Elevation (m)',
                 value2='Elevation (m)',
-                cmap='terrain'
+                cmap='terrain',
+                shared_scale=False
             )
             plt.savefig(os.path.join(output_path, 'terrain_comparison.png'))
+            plt.close()
+
+            plot_comparison(
+                data1=final_elevation,
+                data2=resampled_dem,
+                title1='Generated Terrain',
+                title2='Target Landscape',
+                value1='Elevation (m)',
+                value2='Elevation (m)',
+                cmap='terrain',
+                shared_scale=True
+            )
+            plt.savefig(os.path.join(output_path, 'terrain_comparison_shared_scale.png'))
             plt.close()
 
             # 绘制隆升分布图
@@ -704,4 +855,4 @@ def main():
         logging.exception("Exception details:")
 
 if __name__ == "__main__":
-    main()  
+    main()
