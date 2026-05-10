@@ -92,6 +92,10 @@ def plot_uplift_distribution(uplift_data: np.ndarray) -> plt.Figure:
 
     return fig
 
+def plot_uplift_distribution_x(uplift_data: np.ndarray) -> plt.Figure:
+    """绘制沿X轴的隆升率分布图"""
+    return plot_uplift_distribution(uplift_data)
+
 def plot_uplift_distribution_y(uplift_data: np.ndarray) -> plt.Figure:
     """绘制沿Y轴的隆升率分布图"""
     setup_plot_style()

@@ -612,9 +612,14 @@ def optimize_uplift_ga(obj_func, resampled_dem, LOW_RES_SHAPE, ORIGINAL_SHAPE,
         lb_array = np.full(n_dim, ga_params['lb'])
         ub_array = np.full(n_dim, ga_params['ub'])
 
-        # 设置运行模式
-        from sko.tools import set_run_mode
-        set_run_mode(obj_func, run_mode)
+        # scikit-opt 的 set_run_mode 只是可选优化；部分环境导入 sko.tools
+        # 会重复设置 multiprocessing start method，失败时不应中断自定义 GA。
+        if run_mode:
+            try:
+                from sko.tools import set_run_mode
+                set_run_mode(obj_func, run_mode)
+            except Exception as e:
+                logging.warning(f"Skipping scikit-opt run mode '{run_mode}': {e}")
 
         # 创建遗传算法实例
         ga = MyGA(

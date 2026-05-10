@@ -8,19 +8,44 @@
 
 ### 一键配置脚本
 
-我们提供了一个自动化配置脚本 `setup_environment.sh`，可以一键完成所有环境配置：
+我们提供了自动化配置脚本，可以一键完成基础工具诊断、Miniconda 安装、本地环境创建、依赖安装和运行验证。
 
 ```bash
-# 在项目根目录下运行
+# macOS / Linux / Windows Git Bash
 bash setup_environment.sh
 ```
 
+```powershell
+# Windows PowerShell
+powershell -ExecutionPolicy Bypass -File .\setup_environment.ps1
+
+# Windows CMD 也可以运行
+setup_environment.bat
+```
+
 该脚本将自动执行以下操作：
-1. 检查并安装 Miniconda（如果不存在）
-2. 创建本地 Conda 环境 `./.conda`
-3. 安装所有必需的包
-4. 注册 Jupyter 内核
-5. 验证环境配置
+1. 诊断 `git`、`bash`、`curl`、`pip`、`python`、`conda`、PowerShell 等基础工具状态
+2. 检查并安装 Miniconda（如果不存在）
+3. 创建本地 Conda 环境 `./.conda`
+4. 从 conda-forge 和 pip 安装锁定版本的兼容依赖
+5. 注册 Jupyter 内核
+6. 运行导入检查和 Fastscape smoke test
+
+只诊断不安装：
+
+```bash
+bash setup_environment.sh --diagnose-only
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\setup_environment.ps1 -DiagnoseOnly
+```
+
+如果 macOS/Linux/Git Bash 缺少基础工具，可尝试：
+
+```bash
+bash setup_environment.sh --install-base
+```
 
 ## 手动配置步骤
 

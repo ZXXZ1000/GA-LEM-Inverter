@@ -11,11 +11,27 @@ This repository contains the implementation of a GA-based inversion method for d
 git clone https://github.com/ZXXZ1000/GA-LEM-Inverter.git
 cd GA-LEM-Inverter
 ```
-Then install the required dependencies:
+Then install the required dependencies with the platform bootstrapper:
 ```bash
-Copypip install -r requirements.txt
+# macOS / Linux / Windows Git Bash
+bash setup_environment.sh
 ```
-If you encounter installation issues, you may need to install some dependencies separately, such as GDAL library, Fastscape library, etc.
+
+```powershell
+# Windows PowerShell / CMD
+powershell -ExecutionPolicy Bypass -File .\setup_environment.ps1
+# or run setup_environment.bat
+```
+
+The setup scripts diagnose base tools, install or reuse Miniconda, create the local `.conda` environment, install pinned compatible dependencies, register the Jupyter kernel, and run a Fastscape smoke test. For diagnostics only:
+
+```bash
+bash setup_environment.sh --diagnose-only
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\setup_environment.ps1 -DiagnoseOnly
+```
 
 ## Three Operation Modes
 

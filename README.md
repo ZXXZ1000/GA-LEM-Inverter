@@ -9,23 +9,38 @@
 
 ### 方法一：一键配置（推荐）
 
-我们提供了自动化配置脚本，可以一键完成所有环境配置：
+我们提供了自动化配置脚本，可以一键完成环境诊断、Miniconda 安装、依赖安装和运行验证：
 
 ```bash
 # 克隆仓库
 git clone https://github.com/ZXXZ1000/GA-LEM-Inverter.git
 cd GA-LEM-Inverter
 
-# 运行一键配置脚本
+# macOS / Linux / Windows Git Bash
 bash setup_environment.sh
+
+# Windows PowerShell / CMD
+powershell -ExecutionPolicy Bypass -File .\setup_environment.ps1
+# 或双击/运行 setup_environment.bat
 ```
 
 该脚本将自动：
+- 诊断 `git`、`bash`、`curl`、`pip`、`python`、`conda` 等基础工具
 - 检查并安装 Miniconda（如果不存在）
 - 创建本地 Conda 环境 `./.conda`
-- 安装所有必需的包（包括 xarray-simlab 和 fastscape）
+- 安装并锁定所有必需的包（包括 xarray-simlab、fastscape、zarr、numpy、PyTorch 等兼容版本）
 - 注册 Jupyter 内核 "GA-LEM-Inverter (Python 3.11)"
-- 验证环境配置
+- 运行 Fastscape smoke test 验证环境配置
+
+常用诊断命令：
+
+```bash
+bash setup_environment.sh --diagnose-only
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\setup_environment.ps1 -DiagnoseOnly
+```
 
 ### 方法二：手动配置
 
