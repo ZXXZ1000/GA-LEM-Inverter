@@ -7,6 +7,7 @@
 import importlib.metadata as md
 import shutil
 import sys
+import warnings
 
 
 VERSION_CHECKS = {
@@ -95,6 +96,18 @@ def test_imports():
             compatibility_ok = False
     except ImportError as e:
         print(f"✗ compatibility import check failed: {e}")
+        compatibility_ok = False
+
+    try:
+        import lpips
+
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=UserWarning)
+            lpips_model = lpips.LPIPS(net="alex", verbose=False)
+        del lpips_model
+        print("✓ LPIPS alex model initialized")
+    except Exception as e:
+        print(f"✗ LPIPS alex model: {e}")
         compatibility_ok = False
 
     tool_ok = True

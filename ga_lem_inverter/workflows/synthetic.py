@@ -68,7 +68,7 @@ class SyntheticExperiment:
         # 2. experiment.patterns：把 ['simple'] 改成 ['simple', 'medium', 'complex']。
         # 3. ga_params.pop / max_iter：把 2 / 1 提高到 50-100 / 100-200。
         # 4. ga_params.n_jobs：按 CPU 核心数调整，-1 表示使用所有核心。
-        # 5. fitness.use_lpips：轻量 demo 设为 False；正式论文级实验可设为 True。
+        # 5. fitness.use_lpips：默认 True，使用 LPIPS 深度感知相似度；只做基础诊断时可设为 False。
         self.config = {
             'experiment': {
                 # 固定随机种子，保证 demo 在不同电脑上首次运行结果相近。
@@ -115,9 +115,9 @@ class SyntheticExperiment:
                 'spacing': 900
             },
             'fitness': {
-                # False 表示使用传统地形相似性指标，避免首次 demo 加载 LPIPS 深度模型。
-                # 正式实验如果要复现实验设计中的感知相似性，可改为 True。
-                'use_lpips': False
+                # True 表示启用 LPIPS 深度感知相似度。安装脚本会提前初始化模型。
+                # 如果只想做极轻量基础诊断，可临时改为 False。
+                'use_lpips': True
             }
         }
 

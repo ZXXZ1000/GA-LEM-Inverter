@@ -18,7 +18,7 @@ powershell -ExecutionPolicy Bypass -File .\tools\environment\setup_environment.p
 .\tools\environment\setup_environment.bat
 ```
 
-The setup scripts create a project-local Conda environment at `./.conda` and install pinned compatible versions of Fastscape, xarray-simlab, zarr, numpy, geospatial packages, PyTorch, LPIPS, Jupyter, and related tools.
+The setup scripts create a project-local Conda environment at `./.conda`, install pinned compatible versions of Fastscape, xarray-simlab, zarr, numpy, geospatial packages, PyTorch, LPIPS, Jupyter, compiler tools, initialize the LPIPS Alex visual-similarity model, and then build the vendored Pecube engine into `vendor/pecube/bin/`.
 Environment setup and diagnostic files live under `tools/environment/` to keep the project root focused on `config.ini`, `runner.py`, and compatibility entry points.
 
 Validate the environment:
@@ -48,7 +48,7 @@ Supported modes:
 - `main`: real DEM inversion.
 - `synthetic`: synthetic terrain validation.
 - `k_sensitivity`: scale-factor/K sensitivity experiment.
-- `pecube_coupled`: FastScape-to-Pecube coupling smoke test. Build the vendored Pecube engine before first use with `bash tools/environment/build_pecube.sh`.
+- `pecube_coupled`: FastScape-to-Pecube coupling smoke test. The normal setup script builds the vendored Pecube engine automatically.
 
 Legacy files `main.py`, `run_synthetic_experiment.py`, and `k_sensitivity_experiment.py` are kept only as compatibility wrappers. The recommended entry point is always `python runner.py`.
 

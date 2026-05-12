@@ -510,6 +510,7 @@ function Verify-Environment {
     Assert-EnvPrefix
     $verifyCode = @'
 import importlib.metadata as md
+import warnings
 import numpy as np
 import scipy
 import matplotlib
@@ -569,6 +570,13 @@ try:
     print(f"scikit-opt=={md.version('scikit-opt')}")
 except Exception as exc:
     print(f"scikit-opt=={md.version('scikit-opt')} (optional import warning: {exc})")
+
+print("Initializing LPIPS alex model")
+with warnings.catch_warnings():
+    warnings.filterwarnings("ignore", category=UserWarning)
+    lpips_model = lpips.LPIPS(net="alex", verbose=False)
+del lpips_model
+print("LPIPS alex model ready")
 print("Fastscape smoke test passed")
 '@
     Push-Location $ProjectRoot
@@ -576,6 +584,30 @@ print("Fastscape smoke test passed")
         $verifyCode | & $EnvPython -
         if ($LASTEXITCODE -ne 0) {
             throw "verification failed with exit code $LASTEXITCODE"
+        }
+    } finally {
+        Pop-Location
+    }
+}
+
+function Build-PecubeEngine {
+    $buildScript = Join-Path $ProjectRoot "tools\environment\build_pecube.sh"
+    if (-not (Test-Path $buildScript -PathType Leaf)) {
+        Write-WarningLine "Pecube build script not found: $buildScript"
+        return
+    }
+
+    $bash = Get-CommandPath "bash"
+    if (-not $bash) {
+        throw "bash was not found. Install Git for Windows or run .\tools\environment\setup_environment.bat, then rerun setup."
+    }
+
+    Write-Info "Building vendored Pecube engine"
+    Push-Location $ProjectRoot
+    try {
+        & $bash $buildScript
+        if ($LASTEXITCODE -ne 0) {
+            throw "Pecube build failed with exit code $LASTEXITCODE"
         }
     } finally {
         Pop-Location
@@ -618,10 +650,12 @@ try {
     Create-OrUpdateEnvironment
     Register-JupyterKernel
     Verify-Environment
+    Build-PecubeEngine
 
     Write-Success "Environment setup completed."
     Write-Info "Use this interpreter: $EnvPython"
     Write-Info "Or activate with: conda activate $EnvPath"
+    Write-Info "Pecube executables: $(Join-Path $ProjectRoot 'vendor\pecube\bin')"
     Write-Info "Log file: $script:LogFile"
 } finally {
     Stop-SetupLog

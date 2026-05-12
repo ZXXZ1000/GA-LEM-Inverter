@@ -11,6 +11,9 @@ SOURCE_SRC_DIR="$SOURCE_DIR/src"
 SOURCE_BIN_DIR="$SOURCE_DIR/bin"
 BIN_DIR="$VENDOR_ROOT/bin"
 LOCAL_CONDA_BIN="$PROJECT_ROOT/.conda/bin"
+LOCAL_CONDA_SCRIPTS="$PROJECT_ROOT/.conda/Scripts"
+LOCAL_CONDA_LIBRARY_BIN="$PROJECT_ROOT/.conda/Library/bin"
+LOCAL_CONDA_MINGW_BIN="$PROJECT_ROOT/.conda/Library/mingw-w64/bin"
 
 print_info() { printf "[INFO] %s\n" "$*"; }
 print_success() { printf "[SUCCESS] %s\n" "$*"; }
@@ -32,9 +35,11 @@ main() {
         exit 1
     fi
 
-    if [ -d "$LOCAL_CONDA_BIN" ]; then
-        export PATH="$LOCAL_CONDA_BIN:$PATH"
-    fi
+    for path_dir in "$LOCAL_CONDA_BIN" "$LOCAL_CONDA_SCRIPTS" "$LOCAL_CONDA_LIBRARY_BIN" "$LOCAL_CONDA_MINGW_BIN"; do
+        if [ -d "$path_dir" ]; then
+            export PATH="$path_dir:$PATH"
+        fi
+    done
 
     require_command make
     require_command gfortran
@@ -44,7 +49,7 @@ main() {
         c_compiler="$(command -v clang)"
     else
         print_error "gcc or clang command not found."
-        print_error "Install a C compiler first. On macOS, install Xcode Command Line Tools or conda-forge compilers."
+        print_error "Install a C compiler first. The setup script installs conda-forge compilers automatically; rerun setup if this is missing."
         exit 1
     fi
     fortran_compiler="$(command -v gfortran)"

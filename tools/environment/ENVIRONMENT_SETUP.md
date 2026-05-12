@@ -8,7 +8,7 @@
 
 ### 一键配置脚本
 
-我们提供了自动化配置脚本，可以一键完成基础工具诊断、Miniconda 安装、本地环境创建、依赖安装和运行验证。
+我们提供了自动化配置脚本，可以一键完成基础工具诊断、Miniconda 安装、本地环境创建、依赖安装、运行验证和内置 Pecube 编译。
 
 ```bash
 # macOS / Linux / Windows Git Bash
@@ -30,6 +30,7 @@ powershell -ExecutionPolicy Bypass -File .\tools\environment\setup_environment.p
 4. 从 conda-forge 和 pip 安装锁定版本的兼容依赖
 5. 注册 Jupyter 内核
 6. 运行导入检查和 Fastscape smoke test
+7. 自动编译内置 Pecube engine，生成 `vendor/pecube/bin/Pecube`、`Test`、`Vtk`
 
 环境相关脚本和日志统一放在 `tools/environment/`，包括 `setup_environment.sh`、`setup_environment.ps1`、`setup_environment.bat`、`test_environment.py` 和 `setup_environment.log`。项目根目录只保留 `config.ini`、`runner.py` 等日常入口。
 
@@ -51,9 +52,17 @@ powershell -ExecutionPolicy Bypass -File .\tools\environment\setup_environment.p
 bash tools/environment/setup_environment.sh --install-base
 ```
 
-### 编译内置 Pecube
+### 内置 Pecube 编译
 
-Pecube 以 vendor 源码形式放在 `vendor/pecube/source/`。默认环境安装会把 `compilers=1.11.0` 和 `make=4.4.1` 安装进项目根目录的 `.conda`，用于编译 Fortran/C engine。使用 `[Run] mode = pecube_coupled` 前先编译出 `vendor/pecube/bin/Pecube`、`Test`、`Vtk`：
+Pecube 以 vendor 源码形式放在 `vendor/pecube/source/`。默认环境安装会把 `compilers=1.11.0` 和 `make=4.4.1` 安装进项目根目录的 `.conda`，用于编译 Fortran/C/C++ engine。`setup_environment.sh` 和 `setup_environment.ps1` 会在环境验证通过后自动编译 Pecube，生成：
+
+```text
+vendor/pecube/bin/Pecube
+vendor/pecube/bin/Test
+vendor/pecube/bin/Vtk
+```
+
+只有需要手动重编译 Pecube 时，才运行：
 
 ```bash
 bash tools/environment/build_pecube.sh
@@ -61,7 +70,7 @@ bash tools/environment/build_pecube.sh
 
 运行时 Python 胶合层会在本次输出目录下生成 `pecube/PGB01/`。`PGB01` 是 Pecube Fortran 程序兼容的 5 字符项目名，用户不需要手动创建。
 
-如果脚本仍提示缺少 `gfortran` 或 `make`，先运行 `python tools/environment/test_environment.py` 看 `.conda` 是否完整；正常情况下不需要用户手动安装系统级编译器。
+如果脚本仍提示缺少 `gfortran`、C/C++ 编译器或 `make`，先运行 `python tools/environment/test_environment.py` 看 `.conda` 是否完整；正常情况下不需要用户手动安装系统级编译器。
 
 ## 手动配置步骤
 
@@ -128,6 +137,8 @@ rm Miniconda3-latest-MacOSX-arm64.sh
 # 运行测试脚本
 ./.conda/bin/python tools/environment/test_environment.py
 ```
+
+验证脚本会同时初始化 LPIPS Alex 视觉相似度模型。正常联网安装时，这一步会把模型权重准备到本机缓存中，后续运行 `python runner.py` 时不需要再临时下载。
 
 ## 环境使用
 
@@ -311,7 +322,7 @@ bash tools/environment/setup_environment.sh
 │   ├── setup_environment.ps1
 │   ├── setup_environment.bat
 │   └── test_environment.py
-└── ga_lem_inverter/docs/ENVIRONMENT_SETUP.md
+└── tools/environment/ENVIRONMENT_SETUP.md
 ```
 
 ### 内核配置

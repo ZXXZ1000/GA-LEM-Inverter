@@ -25,11 +25,11 @@ powershell -ExecutionPolicy Bypass -File .\tools\environment\setup_environment.p
 .\tools\environment\setup_environment.bat
 ```
 
-安装脚本会诊断基础工具，安装或复用 Miniconda，并把项目环境创建到仓库根目录的 `./.conda`。依赖版本已锁定，避免 Fastscape、xarray-simlab、zarr、numpy 等包之间的兼容性问题。
+安装脚本会诊断基础工具，安装或复用 Miniconda，并把项目环境创建到仓库根目录的 `./.conda`。依赖版本已锁定，避免 Fastscape、xarray-simlab、zarr、numpy 等包之间的兼容性问题。安装阶段还会初始化 LPIPS Alex 视觉相似度模型，并自动编译内置 Pecube，把 `Pecube/Test/Vtk` 放到 `vendor/pecube/bin/`。
 
 环境相关脚本统一收在 `tools/environment/`，包括安装脚本、Windows wrapper、环境检查脚本和安装日志。根目录只保留日常使用入口和配置文件。
 
-更详细的环境说明见 `ga_lem_inverter/docs/ENVIRONMENT_SETUP.md`，锁定依赖清单见 `ga_lem_inverter/docs/requirements_pinned.txt`。
+更详细的环境说明见 `tools/environment/ENVIRONMENT_SETUP.md`，锁定依赖清单见 `tools/environment/requirements_pinned.txt`。英文说明见根目录 `README_EN.md`。
 
 安装完成后激活环境：
 
@@ -67,7 +67,7 @@ mode = main
 - `main`：真实 DEM 主优化反演。默认 demo 会用内置 DEM 生成一组轻量但有意义的反演结果。
 - `synthetic`：合成地形验证实验。用于确认 Fastscape 正演、GA 反演和评价指标链路可用。
 - `k_sensitivity`：`scale_factor/K` 敏感性实验。用于比较不同降维因子对反演效果的影响。
-- `pecube_coupled`：FastScape 序列转 Pecube 的耦合 smoke 验证。首次使用前需要先编译内置 Pecube engine。
+- `pecube_coupled`：FastScape 序列转 Pecube 的耦合 smoke 验证。正常安装完成后可直接运行。
 
 旧入口 `main.py`、`run_synthetic_experiment.py`、`k_sensitivity_experiment.py` 仍保留为兼容 wrapper，但推荐始终使用 `python runner.py`。
 
@@ -129,7 +129,7 @@ Python API 入口是：
 from ga_lem_inverter.integrations.pecube import PecubeEngine
 ```
 
-首次运行 Pecube 耦合模式前，先编译 Fortran engine：
+一键安装脚本会自动编译 Fortran engine。只有需要手动重编译 Pecube 时，再运行：
 
 ```bash
 bash tools/environment/build_pecube.sh

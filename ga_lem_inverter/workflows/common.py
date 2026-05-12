@@ -166,7 +166,7 @@ def run_synthetic_case(
         time_total=model_params["time_total"],
     )
 
-    use_lpips = get_bool(config, "Fitness", "use_lpips", False)
+    use_lpips = get_bool(config, "Fitness", "use_lpips", True)
     objective = build_objective(target_dem, low_res_shape, model_params, ksp, use_lpips)
     ga_params = ga_params_from_config(config)
     n_jobs = config_int(config, "Optimization", "n_jobs", 1)

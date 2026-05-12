@@ -719,6 +719,7 @@ verify_environment() {
         cd "$SCRIPT_DIR"
         "$ENV_PYTHON" - <<'PY'
 import importlib.metadata as md
+import warnings
 import numpy as np
 import scipy
 import matplotlib
@@ -778,8 +779,29 @@ try:
     print(f"scikit-opt=={md.version('scikit-opt')}")
 except Exception as exc:
     print(f"scikit-opt=={md.version('scikit-opt')} (optional import warning: {exc})")
+
+print("Initializing LPIPS alex model")
+with warnings.catch_warnings():
+    warnings.filterwarnings("ignore", category=UserWarning)
+    lpips_model = lpips.LPIPS(net="alex", verbose=False)
+del lpips_model
+print("LPIPS alex model ready")
 print("Fastscape smoke test passed")
 PY
+    )
+}
+
+build_pecube_engine() {
+    local build_script="$SCRIPT_DIR/tools/environment/build_pecube.sh"
+    if [ ! -f "$build_script" ]; then
+        print_warning "Pecube build script not found: $build_script"
+        return 0
+    fi
+
+    print_info "Building vendored Pecube engine"
+    (
+        cd "$SCRIPT_DIR"
+        bash "$build_script"
     )
 }
 
@@ -815,10 +837,12 @@ main() {
     create_or_update_environment
     register_jupyter_kernel
     verify_environment
+    build_pecube_engine
 
     print_success "Environment setup completed."
     print_info "Use: conda activate $ENV_PATH"
     print_info "Or:  $ENV_PYTHON tools/environment/test_environment.py"
+    print_info "Pecube executables: $SCRIPT_DIR/vendor/pecube/bin"
     print_info "Log file: $LOG_FILE"
 }
 

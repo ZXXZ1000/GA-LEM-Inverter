@@ -68,7 +68,7 @@ def _copy_legacy_sections(config: configparser.ConfigParser) -> None:
                 config["Optimization"][key] = config["Preprocessing"][key]
 
     if "Fitness" not in config:
-        config["Fitness"] = {"use_lpips": "false"}
+        config["Fitness"] = {"use_lpips": "true"}
 
 
 def _clean_paths(config: configparser.ConfigParser) -> None:
