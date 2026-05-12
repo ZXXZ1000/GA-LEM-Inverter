@@ -12,11 +12,14 @@ setup_environment.log
 *.log
 
 # Experiment outputs
-outputs/
-demo_outputs/
-synthetic_experiments/
-sensitivity_experiments/
-results/
+/outputs/
+demo/outputs/*
+!demo/outputs/
+!demo/outputs/.gitkeep
+/demo_outputs/
+/synthetic_experiments/
+/sensitivity_experiments/
+/results/
 
 # Python cache and build artifacts
 __pycache__/

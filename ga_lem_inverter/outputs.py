@@ -29,6 +29,7 @@ class RunContext:
     config: configparser.ConfigParser
     metrics: dict[str, Any] = field(default_factory=dict)
     artifacts: list[str] = field(default_factory=list)
+    figure_index: int = 0
     status: str = "running"
     message: str = ""
 
@@ -57,9 +58,15 @@ class RunContext:
         if artifact not in self.artifacts:
             self.artifacts.append(artifact)
 
+    def figure_path(self, filename: str | Path) -> Path:
+        """Return the next numbered figure path for this run."""
+        self.figure_index += 1
+        name = Path(filename).name
+        return self.figures_dir / f"{self.figure_index:02d}_{name}"
+
 
 def create_run_context(config_path: Path, config: configparser.ConfigParser, mode: str) -> RunContext:
-    output_base = Path(config.get("Data", "output_path", fallback="./outputs")).resolve()
+    output_base = Path(config.get("Data", "output_path", fallback="./demo/outputs")).resolve()
     output_base.mkdir(parents=True, exist_ok=True)
     with _output_lock(output_base):
         run_number = _next_run_number(output_base)
@@ -162,7 +169,7 @@ def write_summary(context: RunContext) -> Path:
         "",
         "## 主要输出",
         "",
-        "- 图像: `figures/`",
+        "- 图像: `figures/`，文件名按生成顺序自动编号",
         "- 数组: `arrays/`",
         "- 指标: `metrics/`",
         "- 日志: `logs/`",

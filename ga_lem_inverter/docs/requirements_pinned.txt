@@ -1,7 +1,7 @@
 # GA-LEM-Inverter pinned runtime dependencies
 #
 # Install note:
-#   Prefer `bash setup_environment.sh` because fastscape/geospatial packages are
+#   Prefer `bash tools/environment/setup_environment.sh` because fastscape/geospatial packages are
 #   more reliable through conda-forge than pure pip. This file mirrors the same
 #   compatibility constraints for reference and pip-only tooling.
 #

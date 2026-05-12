@@ -69,7 +69,7 @@ def _plot_k_sensitivity_summary(context: RunContext, k_values: list[int], metric
     ax1.legend(lines1 + lines2, labels1 + labels2, loc="best")
     fig.tight_layout()
 
-    path = context.figures_dir / "k_sensitivity_summary.png"
+    path = context.figure_path("k_sensitivity_summary.png")
     fig.savefig(path, dpi=200)
     plt.close(fig)
     context.add_artifact(path)

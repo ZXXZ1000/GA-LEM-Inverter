@@ -3,7 +3,7 @@ GA-LEM-Inverter Windows bootstrap and diagnostics.
 
 Use this from Windows PowerShell or PowerShell 7:
 
-  powershell -ExecutionPolicy Bypass -File .\setup_environment.ps1
+  powershell -ExecutionPolicy Bypass -File .\tools\environment\setup_environment.ps1
 
 The script does not require Git Bash, bash, or system pip. It installs or reuses
 Miniconda, creates a project-local .conda environment, installs pinned packages,
@@ -44,7 +44,7 @@ function Write-WarningLine($Message) { Write-Host "[WARNING] $Message" -Foregrou
 function Write-ErrorLine($Message) { Write-Host "[ERROR] $Message" -ForegroundColor Red }
 
 function Start-SetupLog {
-    $script:LogFile = Join-Path $ProjectRoot "setup_environment.log"
+    $script:LogFile = Join-Path $EnvironmentToolsDir "setup_environment.log"
     if (Test-Path $script:LogFile) {
         Remove-Item -Force $script:LogFile
     }
@@ -121,7 +121,7 @@ function Install-MinicondaIfNeeded {
 
     $installer = "Miniconda3-latest-Windows-x86_64.exe"
     $url = "https://repo.anaconda.com/miniconda/$installer"
-    $installerPath = Join-Path $ProjectRoot $installer
+    $installerPath = Join-Path $EnvironmentToolsDir $installer
 
     Write-Info "Miniconda not found. Downloading $installer"
     Invoke-WebRequest -Uri $url -OutFile $installerPath
@@ -219,6 +219,7 @@ function Configure-CondaArgs {
 function Resolve-ProjectRoot {
     if (-not [string]::IsNullOrWhiteSpace($ProjectDir)) {
         $candidate = $ProjectDir
+        $script:EnvironmentToolsDir = Join-Path $candidate "tools\environment"
     } else {
         $candidate = $PSScriptRoot
         if ([string]::IsNullOrWhiteSpace($candidate)) {
@@ -227,21 +228,37 @@ function Resolve-ProjectRoot {
         if ([string]::IsNullOrWhiteSpace($candidate)) {
             $candidate = (Get-Location).Path
         }
+        $script:EnvironmentToolsDir = $candidate
     }
 
     if (-not (Test-Path $candidate -PathType Container)) {
         throw "Project directory does not exist: $candidate"
     }
 
-    return (Resolve-Path $candidate).Path
+    $resolvedCandidate = (Resolve-Path $candidate).Path
+    if ((Test-Path (Join-Path $resolvedCandidate "config.ini") -PathType Leaf) -and
+        (Test-Path (Join-Path $resolvedCandidate "runner.py") -PathType Leaf)) {
+        return $resolvedCandidate
+    }
+
+    $parentCandidate = Join-Path $resolvedCandidate "..\.."
+    if ((Test-Path (Join-Path $parentCandidate "config.ini") -PathType Leaf) -and
+        (Test-Path (Join-Path $parentCandidate "runner.py") -PathType Leaf)) {
+        return (Resolve-Path $parentCandidate).Path
+    }
+
+    return $resolvedCandidate
 }
 
 function Assert-ProjectRoot {
     $missing = @()
-    foreach ($file in @("main.py", "config.ini", "setup_environment.ps1")) {
+    foreach ($file in @("runner.py", "main.py", "config.ini")) {
         if (-not (Test-Path (Join-Path $ProjectRoot $file) -PathType Leaf)) {
             $missing += $file
         }
+    }
+    if (-not (Test-Path (Join-Path $ProjectRoot "ga_lem_inverter") -PathType Container)) {
+        $missing += "ga_lem_inverter"
     }
     if ($missing.Count -gt 0) {
         throw "Project root check failed: $ProjectRoot. Missing required project files: $($missing -join ', '). Pass -ProjectDir C:\path\to\GA-LEM-Inverter if this script was launched from a wrapper."
@@ -284,6 +301,7 @@ function Run-Diagnostics {
     Write-Info "Running host diagnostics"
     Write-Info "Current dir: $((Get-Location).Path)"
     Write-Info "Project dir: $ProjectRoot"
+    Write-Info "Environment tools dir: $EnvironmentToolsDir"
     Write-Info "PowerShell: $($PSVersionTable.PSVersion)"
     Write-Info "OS: $([System.Environment]::OSVersion.VersionString)"
     Write-Info "Architecture: $([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)"
@@ -364,6 +382,7 @@ $PipPackages = @(
 
 function Print-Plan {
     Write-Info "Project dir: $ProjectRoot"
+    Write-Info "Environment tools dir: $EnvironmentToolsDir"
     Write-Info "Conda root: $CondaRoot"
     Write-Info "Conda solver preference: $CondaSolver"
     Write-Info "Conda repodata preference: $CondaRepodataFn"
@@ -562,6 +581,10 @@ print("Fastscape smoke test passed")
 }
 
 $ProjectRoot = Resolve-ProjectRoot
+$projectEnvironmentToolsDir = Join-Path $ProjectRoot "tools\environment"
+if (Test-Path $projectEnvironmentToolsDir -PathType Container) {
+    $EnvironmentToolsDir = (Resolve-Path $projectEnvironmentToolsDir).Path
+}
 Assert-ProjectRoot
 $EnvPath = Join-Path $ProjectRoot $EnvDirName
 $EnvPython = Join-Path $EnvPath "python.exe"

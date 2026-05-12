@@ -41,7 +41,7 @@ print_warning() { printf "%b[WARNING]%b %s\n" "$YELLOW" "$NC" "$*"; }
 print_error() { printf "%b[ERROR]%b %s\n" "$RED" "$NC" "$*" >&2; }
 
 setup_logging() {
-    LOG_FILE="$SCRIPT_DIR/setup_environment.log"
+    LOG_FILE="$ENV_SCRIPT_DIR/setup_environment.log"
     : > "$LOG_FILE"
     exec > >(tee -a "$LOG_FILE") 2>&1
     print_info "Log file: $LOG_FILE"
@@ -49,7 +49,7 @@ setup_logging() {
 
 usage() {
     cat <<'EOF'
-Usage: bash setup_environment.sh [options]
+Usage: bash tools/environment/setup_environment.sh [options]
 
 Options:
   --keep-existing     Do not delete an existing .conda environment; install/update into it.
@@ -136,7 +136,8 @@ resolve_project_root() {
                 source="$dir/$target"
             fi
         done
-        candidate="$(cd -P "$(dirname "$source")" >/dev/null 2>&1 && pwd)"
+        ENV_SCRIPT_DIR="$(cd -P "$(dirname "$source")" >/dev/null 2>&1 && pwd)"
+        candidate="$ENV_SCRIPT_DIR"
     fi
 
     if [ ! -d "$candidate" ]; then
@@ -144,16 +145,29 @@ resolve_project_root() {
         exit 1
     fi
 
-    SCRIPT_DIR="$(cd "$candidate" >/dev/null 2>&1 && pwd -P)"
+    candidate="$(cd "$candidate" >/dev/null 2>&1 && pwd -P)"
+    if [ -f "$candidate/config.ini" ] && [ -f "$candidate/runner.py" ]; then
+        SCRIPT_DIR="$candidate"
+    elif [ -f "$candidate/../../config.ini" ] && [ -f "$candidate/../../runner.py" ]; then
+        SCRIPT_DIR="$(cd "$candidate/../.." >/dev/null 2>&1 && pwd -P)"
+    else
+        SCRIPT_DIR="$candidate"
+    fi
+
+    if [ -z "${ENV_SCRIPT_DIR:-}" ]; then
+        ENV_SCRIPT_DIR="$SCRIPT_DIR/tools/environment"
+    fi
 }
 
 validate_project_root() {
     local missing=()
     local file
 
-    for file in main.py config.ini setup_environment.sh; do
+    for file in runner.py main.py config.ini ga_lem_inverter; do
         if [ ! -f "$SCRIPT_DIR/$file" ]; then
-            missing+=("$file")
+            if [ ! -d "$SCRIPT_DIR/$file" ]; then
+                missing+=("$file")
+            fi
         fi
     done
 
@@ -242,6 +256,7 @@ run_host_diagnostics() {
     print_info "Host diagnostics"
     print_info "Current dir: $(pwd)"
     print_info "Project dir: $SCRIPT_DIR"
+    print_info "Environment tools dir: $ENV_SCRIPT_DIR"
     print_info "Shell: ${SHELL:-unknown}"
     print_info "uname: $(uname -a)"
     for tool in git bash curl pip python conda powershell pwsh winget.exe; do
@@ -371,7 +386,7 @@ install_miniconda_if_needed() {
 
     local installer installer_path url
     installer="$(miniconda_installer_name)"
-    installer_path="$SCRIPT_DIR/$installer"
+    installer_path="$ENV_SCRIPT_DIR/$installer"
     url="https://repo.anaconda.com/miniconda/$installer"
 
     print_info "Miniconda not found. Downloading $installer"
@@ -570,6 +585,7 @@ PIP_PACKAGES=(
 print_plan() {
     print_info "Platform: $PLATFORM / $ARCH"
     print_info "Project dir: $SCRIPT_DIR"
+    print_info "Environment tools dir: $ENV_SCRIPT_DIR"
     print_info "Conda root: $CONDA_ROOT"
     print_info "Conda solver preference: $CONDA_SOLVER"
     print_info "Conda repodata preference: $CONDA_REPODATA_FN"
@@ -800,7 +816,7 @@ main() {
 
     print_success "Environment setup completed."
     print_info "Use: conda activate $ENV_PATH"
-    print_info "Or:  $ENV_PYTHON test_environment.py"
+    print_info "Or:  $ENV_PYTHON tools/environment/test_environment.py"
     print_info "Log file: $LOG_FILE"
 }
 

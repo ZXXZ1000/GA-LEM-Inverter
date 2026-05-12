@@ -7,27 +7,30 @@ GA-LEM-Inverter couples Fastscape landscape evolution modeling with genetic-algo
 macOS / Linux / Windows Git Bash:
 
 ```bash
-bash setup_environment.sh
+bash tools/environment/setup_environment.sh
 ```
 
 Windows PowerShell:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\setup_environment.ps1
+powershell -ExecutionPolicy Bypass -File .\tools\environment\setup_environment.ps1
+# Or from CMD:
+.\tools\environment\setup_environment.bat
 ```
 
 The setup scripts create a project-local Conda environment at `./.conda` and install pinned compatible versions of Fastscape, xarray-simlab, zarr, numpy, geospatial packages, PyTorch, LPIPS, Jupyter, and related tools.
+Environment setup and diagnostic files live under `tools/environment/` to keep the project root focused on `config.ini`, `runner.py`, and compatibility entry points.
 
 Validate the environment:
 
 ```bash
 conda activate ./.conda
-python test_environment.py
+python tools/environment/test_environment.py
 ```
 
 ## Run
 
-The default `config.ini` points to the bundled demo DEM:
+The default `config.ini` points to the bundled demo DEM at `demo/data/demo_dem.tif`:
 
 ```bash
 python runner.py
@@ -53,7 +56,7 @@ Legacy files `main.py`, `run_synthetic_experiment.py`, and `k_sensitivity_experi
 Each run creates a structured directory such as:
 
 ```text
-outputs/0001_2026-05-12_17-45-30_main/
+demo/outputs/0001_2026-05-12_17-45-30_main/
 ```
 
 Every run contains:
@@ -68,4 +71,4 @@ arrays/
 metrics/
 ```
 
-Start with `summary.md`; it lists the mode, key parameters, metrics, and main output locations.
+Start with `summary.md`; it lists the mode, key parameters, metrics, and main output locations. Files in `figures/` are automatically numbered in generation order, for example `01_original_dem.png`.

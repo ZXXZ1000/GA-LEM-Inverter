@@ -12,15 +12,15 @@
 
 ```bash
 # macOS / Linux / Windows Git Bash
-bash setup_environment.sh
+bash tools/environment/setup_environment.sh
 ```
 
 ```powershell
 # Windows PowerShell
-powershell -ExecutionPolicy Bypass -File .\setup_environment.ps1
+powershell -ExecutionPolicy Bypass -File .\tools\environment\setup_environment.ps1
 
 # Windows CMD 也可以运行
-setup_environment.bat
+.\tools\environment\setup_environment.bat
 ```
 
 该脚本将自动执行以下操作：
@@ -31,14 +31,16 @@ setup_environment.bat
 5. 注册 Jupyter 内核
 6. 运行导入检查和 Fastscape smoke test
 
+环境相关脚本和日志统一放在 `tools/environment/`，包括 `setup_environment.sh`、`setup_environment.ps1`、`setup_environment.bat`、`test_environment.py` 和 `setup_environment.log`。项目根目录只保留 `config.ini`、`runner.py` 等日常入口。
+
 只诊断不安装：
 
 ```bash
-bash setup_environment.sh --diagnose-only
+bash tools/environment/setup_environment.sh --diagnose-only
 ```
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\setup_environment.ps1 -DiagnoseOnly
+powershell -ExecutionPolicy Bypass -File .\tools\environment\setup_environment.ps1 -DiagnoseOnly
 ```
 
 脚本会把目标环境强制设为项目根目录下的 `.conda`。它可以复用系统或用户目录里的 base conda 作为包管理器，但所有 conda 安装命令都会使用 `-p <项目路径>/.conda`，并在安装后校验环境 Python 的 `sys.prefix` 是否真的等于该目录。
@@ -46,7 +48,7 @@ powershell -ExecutionPolicy Bypass -File .\setup_environment.ps1 -DiagnoseOnly
 如果 macOS/Linux/Git Bash 缺少基础工具，可尝试：
 
 ```bash
-bash setup_environment.sh --install-base
+bash tools/environment/setup_environment.sh --install-base
 ```
 
 ## 手动配置步骤
@@ -112,7 +114,7 @@ rm Miniconda3-latest-MacOSX-arm64.sh
 
 ```bash
 # 运行测试脚本
-./.conda/bin/python test_environment.py
+./.conda/bin/python tools/environment/test_environment.py
 ```
 
 ## 环境使用
@@ -243,7 +245,7 @@ jupyter kernelspec remove ga-lem-inverter -f
 ### Q: 权限问题
 A: 确保脚本有执行权限：
 ```bash
-chmod +x setup_environment.sh
+chmod +x tools/environment/setup_environment.sh
 ```
 
 ## 环境管理
@@ -270,7 +272,7 @@ chmod +x setup_environment.sh
 rm -rf ./.conda
 
 # 重新运行配置脚本
-bash setup_environment.sh
+bash tools/environment/setup_environment.sh
 ```
 
 ## 技术细节
@@ -284,8 +286,14 @@ bash setup_environment.sh
 │   └── ...               # 其他环境文件
 ├── runner.py              # 统一运行入口
 ├── config.ini             # 主配置文件
-├── setup_environment.sh    # 配置脚本
-├── test_environment.py    # 测试脚本
+├── demo/                  # demo 输入和默认输出
+│   ├── data/              # 内置 DEM、真值隆升场和示例 shapefile
+│   └── outputs/           # 默认运行输出，内容不提交到代码库
+├── tools/environment/     # 环境安装、诊断和检查脚本
+│   ├── setup_environment.sh
+│   ├── setup_environment.ps1
+│   ├── setup_environment.bat
+│   └── test_environment.py
 └── ga_lem_inverter/docs/ENVIRONMENT_SETUP.md
 ```
 
@@ -318,7 +326,7 @@ Jupyter 内核配置文件位置：
 
 如果遇到环境配置问题，请：
 1. 检查本文档的常见问题部分
-2. 运行 `test_environment.py` 获取详细错误信息
+2. 运行 `tools/environment/test_environment.py` 获取详细错误信息
 3. 运行 `python runner.py` 查看中文运行诊断
 4. 检查系统兼容性（macOS / Linux / Windows）
 5. 确保网络连接正常（用于下载包）

@@ -262,21 +262,21 @@ def _save_case_figures(
     _save_current_figure(context, f"{prefix}_uplift_distribution.png")
 
     fig_3d = plot_3d_surface(final_dem, inverted_uplift, "3D Terrain with Uplift Field")
-    path = context.figures_dir / f"{prefix}_3d_terrain.png"
+    path = context.figure_path(f"{prefix}_3d_terrain.png")
     fig_3d.savefig(path)
     plt.close(fig_3d)
     context.add_artifact(path)
 
     if fitness_history is not None and len(fitness_history) > 0:
         fig_history = plot_optimization_history(fitness_history)
-        path = context.figures_dir / f"{prefix}_optimization_history.png"
+        path = context.figure_path(f"{prefix}_optimization_history.png")
         fig_history.savefig(path)
         plt.close(fig_history)
         context.add_artifact(path)
 
 
 def _save_current_figure(context: RunContext, filename: str) -> None:
-    path = context.figures_dir / filename
+    path = context.figure_path(filename)
     plt.savefig(path)
     plt.close()
     context.add_artifact(path)

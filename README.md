@@ -14,16 +14,20 @@ cd GA-LEM-Inverter
 macOS / Linux / Windows Git Bash：
 
 ```bash
-bash setup_environment.sh
+bash tools/environment/setup_environment.sh
 ```
 
 Windows PowerShell / CMD：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\setup_environment.ps1
+powershell -ExecutionPolicy Bypass -File .\tools\environment\setup_environment.ps1
+# 或在 CMD / 双击运行：
+.\tools\environment\setup_environment.bat
 ```
 
 安装脚本会诊断基础工具，安装或复用 Miniconda，并把项目环境创建到仓库根目录的 `./.conda`。依赖版本已锁定，避免 Fastscape、xarray-simlab、zarr、numpy 等包之间的兼容性问题。
+
+环境相关脚本统一收在 `tools/environment/`，包括安装脚本、Windows wrapper、环境检查脚本和安装日志。根目录只保留日常使用入口和配置文件。
 
 更详细的环境说明见 `ga_lem_inverter/docs/ENVIRONMENT_SETUP.md`，锁定依赖清单见 `ga_lem_inverter/docs/requirements_pinned.txt`。
 
@@ -36,12 +40,12 @@ conda activate ./.conda
 然后检查环境：
 
 ```bash
-python test_environment.py
+python tools/environment/test_environment.py
 ```
 
 ## 一键运行
 
-默认 `config.ini` 已经指向 `demo_data/demo_dem.tif`，不改配置也可以直接运行：
+默认 `config.ini` 已经指向 `demo/data/demo_dem.tif`，不改配置也可以直接运行：
 
 ```bash
 python runner.py
@@ -87,8 +91,8 @@ mode = main
 每次运行都会生成独立目录：
 
 ```text
-outputs/0001_2026-05-12_17-45-30_main/
-outputs/0002_2026-05-12_18-10-02_synthetic/
+demo/outputs/0001_2026-05-12_17-45-30_main/
+demo/outputs/0002_2026-05-12_18-10-02_synthetic/
 ```
 
 目录结构固定：
@@ -103,11 +107,11 @@ arrays/
 metrics/
 ```
 
-优先打开 `summary.md`，里面有本次运行模式、关键参数、主要指标和输出位置。`run_manifest.json` 会记录 git commit、Python 版本、关键依赖版本、配置副本和输出文件清单。
+优先打开 `summary.md`，里面有本次运行模式、关键参数、主要指标和输出位置。`figures/` 内的图片会按生成顺序自动编号，例如 `01_original_dem.png`、`02_rotated_dem.png`，便于按流程查看。`run_manifest.json` 会记录 git commit、Python 版本、关键依赖版本、配置副本和输出文件清单。
 
 ## Demo 数据
 
-仓库内置 `demo_data/demo_dem.tif` 和 `demo_data/demo_true_uplift.npy`，用于默认 `main` demo 的轻量验证。默认配置不要求断层或研究区 Shapefile；如果没有提供这些文件，程序会自动使用 DEM 全域和均一侵蚀系数场。
+仓库内置 demo 文件统一放在 `demo/` 下：`demo/data/` 是输入数据，`demo/outputs/` 是默认运行输出。`demo/data/demo_dem.tif` 和 `demo/data/demo_true_uplift.npy` 用于默认 `main` demo 的轻量验证。默认配置不要求断层或研究区 Shapefile；如果没有提供这些文件，程序会自动使用 DEM 全域和均一侵蚀系数场。
 
 ## 常见调整
 

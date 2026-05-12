@@ -583,7 +583,7 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
         # 显示原始DEM
         plt.figure(figsize=(15, 10))
         plot_single_data(dem_data, "Original DEM", cmap='terrain', origin='upper') # 显示 *原始* DEM
-        figure_path = figures_dir / 'original_dem.png'
+        figure_path = context.figure_path('original_dem.png')
         plt.savefig(figure_path)
         context.add_artifact(figure_path)
         plt.close()
@@ -591,14 +591,14 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
         # 显示旋转后的DEM
         plt.figure(figsize=(15, 10))
         plot_single_data(rotated_dem_data, "Rotated DEM", cmap='terrain', origin='upper') # 显示 *旋转后* DEM
-        figure_path = figures_dir / 'rotated_dem.png'
+        figure_path = context.figure_path('rotated_dem.png')
         plt.savefig(figure_path)
         context.add_artifact(figure_path)
         plt.close()
 
         # 显示侵蚀系数场
         display_erosion_field(rotated_Ksp, shape=ORIGINAL_SHAPE) #  显示 *旋转后* 的 Ksp
-        figure_path = figures_dir / 'erosion_field.png'
+        figure_path = context.figure_path('erosion_field.png')
         plt.savefig(figure_path)
         context.add_artifact(figure_path)
         plt.close()
@@ -608,7 +608,7 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
         plt.imshow(rotated_dem_data, cmap='terrain', origin='upper')
         plt.imshow(rotated_Ksp, cmap='RdBu_r', alpha=0.5, origin='upper')
         plt.title("Rotated DEM with Erosion Coefficient Field")
-        figure_path = figures_dir / 'dem_with_erosion_field.png'
+        figure_path = context.figure_path('dem_with_erosion_field.png')
         plt.savefig(figure_path)
         context.add_artifact(figure_path)
         plt.close()
@@ -625,7 +625,7 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
             cmap='terrain',
             figsize=(15, 10)
         )
-        figure_path = figures_dir / 'dem_rotation_comparison.png'
+        figure_path = context.figure_path('dem_rotation_comparison.png')
         plt.savefig(figure_path)
         context.add_artifact(figure_path)
         plt.close()
@@ -641,7 +641,7 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
             cmap='RdBu_r',
             figsize=(15, 10)
         )
-        figure_path = figures_dir / 'ksp_rotation_comparison.png'
+        figure_path = context.figure_path('ksp_rotation_comparison.png')
         plt.savefig(figure_path)
         context.add_artifact(figure_path)
         plt.close()
@@ -674,7 +674,7 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
             # 6. 绘制优化历史
             if fitness_history is not None:
                 fig_history = plot_optimization_history(fitness_history)
-                figure_path = figures_dir / 'optimization_history.png'
+                figure_path = context.figure_path('optimization_history.png')
                 fig_history.savefig(figure_path)
                 context.add_artifact(figure_path)
                 plt.close(fig_history)
@@ -702,7 +702,7 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
                 value2='Uplift Rate (mm/yr)',
                 cmap='RdBu_r'
             )
-            figure_path = figures_dir / 'uplift_comparison.png'
+            figure_path = context.figure_path('uplift_comparison.png')
             plt.savefig(figure_path)
             context.add_artifact(figure_path)
             plt.close()
@@ -744,7 +744,7 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
                             value2='Uplift Rate (mm/yr)',
                             cmap='RdBu_r'
                         )
-                        figure_path = figures_dir / 'demo_true_vs_inverted_uplift.png'
+                        figure_path = context.figure_path('demo_true_vs_inverted_uplift.png')
                         plt.savefig(figure_path)
                         context.add_artifact(figure_path)
                         plt.close()
@@ -802,7 +802,7 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
                 cmap='terrain',
                 shared_scale=False
             )
-            figure_path = figures_dir / 'terrain_comparison.png'
+            figure_path = context.figure_path('terrain_comparison.png')
             plt.savefig(figure_path)
             context.add_artifact(figure_path)
             plt.close()
@@ -817,20 +817,20 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
                 cmap='terrain',
                 shared_scale=True
             )
-            figure_path = figures_dir / 'terrain_comparison_shared_scale.png'
+            figure_path = context.figure_path('terrain_comparison_shared_scale.png')
             plt.savefig(figure_path)
             context.add_artifact(figure_path)
             plt.close()
 
             # 绘制隆升分布图
             plot_uplift_distribution_x(best_full_res_uplift)
-            figure_path = figures_dir / 'uplift_distribution_x.png'
+            figure_path = context.figure_path('uplift_distribution_x.png')
             plt.savefig(figure_path)
             context.add_artifact(figure_path)
             plt.close()
 
             plot_uplift_distribution_y(best_full_res_uplift)
-            figure_path = figures_dir / 'uplift_distribution_y.png'
+            figure_path = context.figure_path('uplift_distribution_y.png')
             plt.savefig(figure_path)
             context.add_artifact(figure_path)
             plt.close()
@@ -841,7 +841,7 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
                 uplift=best_full_res_uplift,
                 title="3D Terrain with Uplift Field"
             )
-            figure_path = figures_dir / '3d_terrain.png'
+            figure_path = context.figure_path('3d_terrain.png')
             fig_3d.savefig(figure_path)
             context.add_artifact(figure_path)
             plt.close(fig_3d)
