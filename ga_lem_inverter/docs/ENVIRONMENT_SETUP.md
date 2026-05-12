@@ -282,9 +282,11 @@ bash setup_environment.sh
 │   ├── bin/               # 可执行文件
 │   ├── lib/               # Python 库
 │   └── ...               # 其他环境文件
+├── runner.py              # 统一运行入口
+├── config.ini             # 主配置文件
 ├── setup_environment.sh    # 配置脚本
 ├── test_environment.py    # 测试脚本
-└── ENVIRONMENT_SETUP.md   # 本文档
+└── ga_lem_inverter/docs/ENVIRONMENT_SETUP.md
 ```
 
 ### 内核配置
@@ -317,5 +319,6 @@ Jupyter 内核配置文件位置：
 如果遇到环境配置问题，请：
 1. 检查本文档的常见问题部分
 2. 运行 `test_environment.py` 获取详细错误信息
-3. 检查系统兼容性（macOS ARM64）
-4. 确保网络连接正常（用于下载包）
+3. 运行 `python runner.py` 查看中文运行诊断
+4. 检查系统兼容性（macOS / Linux / Windows）
+5. 确保网络连接正常（用于下载包）

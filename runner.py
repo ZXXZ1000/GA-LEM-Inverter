@@ -1,6 +1,6 @@
-"""Backward-compatible wrapper.
+"""Unified public entry point.
 
-推荐入口是:
+普通用户只需要运行:
 
     python runner.py
 """
@@ -9,4 +9,4 @@ from ga_lem_inverter.runner import main
 
 
 if __name__ == "__main__":
-    raise SystemExit(main(default_mode="main"))
+    raise SystemExit(main())

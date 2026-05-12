@@ -730,7 +730,7 @@ import seaborn
 assert hasattr(zarr, "MemoryStore"), "zarr<3 is required for xarray-simlab"
 assert hasattr(np, "in1d"), "numpy<2.4 is required for xarray-simlab"
 
-from model_runner import run_fastscape_model
+from ga_lem_inverter.pipeline.forward_model import run_fastscape_model
 
 shape = (10, 10)
 k_sp = np.full(shape, 6.92e-6)

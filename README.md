@@ -1,242 +1,139 @@
-[English Version](README_EN.md)
-
 # GA-LEM-Inverter
-本代码库包含了一种基于遗传算法的景观演化模型（LEM）逆反演方法，用于从地形中解析构造隆升场。特点包括与Fastscape景观演化模型的耦合、采用感知相似性（LPIPS）的多维适应度函数以及降维策略。相关论文：[提交中]。
 
-# 景观演化模型遗传算法优化使用说明
+GA-LEM-Inverter 是一个基于 Fastscape 景观演化模型和遗传算法的构造隆升场反演工具。当前版本已经整理为统一入口：普通用户只需要安装环境、修改 `config.ini`、运行 `python runner.py`。
 
-## 环境安装
+## 一键安装
 
-### 方法一：一键配置（推荐）
-
-我们提供了自动化配置脚本，可以一键完成环境诊断、Miniconda 安装、依赖安装和运行验证：
+克隆仓库后进入项目目录：
 
 ```bash
-# 克隆仓库
 git clone https://github.com/ZXXZ1000/GA-LEM-Inverter.git
 cd GA-LEM-Inverter
-
-# macOS / Linux / Windows Git Bash
-bash setup_environment.sh
-
-# Windows PowerShell / CMD
-powershell -ExecutionPolicy Bypass -File .\setup_environment.ps1
-# 或双击/运行 setup_environment.bat
 ```
 
-该脚本将自动：
-- 诊断 `git`、`bash`、`curl`、`pip`、`python`、`conda` 等基础工具
-- 检查并安装 Miniconda（如果不存在）
-- 创建本地 Conda 环境 `./.conda`
-- 安装并锁定所有必需的包（包括 xarray-simlab、fastscape、zarr、numpy、PyTorch 等兼容版本）
-- 注册 Jupyter 内核 "GA-LEM-Inverter (Python 3.11)"
-- 运行 Fastscape smoke test 验证环境配置
-
-常用诊断命令：
+macOS / Linux / Windows Git Bash：
 
 ```bash
-bash setup_environment.sh --diagnose-only
+bash setup_environment.sh
 ```
+
+Windows PowerShell / CMD：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\setup_environment.ps1 -DiagnoseOnly
+powershell -ExecutionPolicy Bypass -File .\setup_environment.ps1
 ```
 
-### 方法二：手动配置
+安装脚本会诊断基础工具，安装或复用 Miniconda，并把项目环境创建到仓库根目录的 `./.conda`。依赖版本已锁定，避免 Fastscape、xarray-simlab、zarr、numpy 等包之间的兼容性问题。
 
-详细的手动配置步骤请参考 [ENVIRONMENT_SETUP.md](ENVIRONMENT_SETUP.md)
+更详细的环境说明见 `ga_lem_inverter/docs/ENVIRONMENT_SETUP.md`，锁定依赖清单见 `ga_lem_inverter/docs/requirements_pinned.txt`。
 
-### 快速验证
-
-环境配置完成后，可以通过以下方式验证：
+安装完成后激活环境：
 
 ```bash
-# 激活环境
 conda activate ./.conda
+```
 
-# 运行测试脚本
+然后检查环境：
+
+```bash
 python test_environment.py
 ```
 
-或启动 Jupyter Notebook 并选择 "GA-LEM-Inverter (Python 3.11)" 内核。
+## 一键运行
 
-### 一键运行默认 demo
-
-仓库已经内置轻量 DEM、断层和研究区示例数据，`config.ini` 默认指向这些文件。环境安装完成后，不需要修改配置即可直接运行：
+默认 `config.ini` 已经指向 `demo_data/demo_dem.tif`，不改配置也可以直接运行：
 
 ```bash
-python main.py
+python runner.py
 ```
 
-该命令会在 `demo_outputs/Expt_时间戳/` 下生成完整过程结果，包括日志、原始/旋转 DEM、侵蚀系数场、隆升率场、优化历史、最终模拟地形和对比图。默认 demo 还会输出 `demo_metrics.txt` 和 `demo_true_vs_inverted_uplift.png`，用于检查反演隆升场与内置真值、模拟地形与目标地形的相关性。
+程序启动时会先打印诊断信息，包括实验模式、输入文件、输出目录、网格大小、`scale_factor/K`、GA 规模、`n_jobs` 和当前预设。缺文件、缺依赖或配置错误会给出中文提示。
 
-合成地形验证也默认配置为轻量 demo：
+## 三种实验模式
 
-```bash
-python run_synthetic_experiment.py
+在 `config.ini` 顶部修改：
+
+```ini
+[Run]
+mode = main
 ```
 
-该命令会在 `demo_outputs/synthetic_experiments/` 下生成合成 DEM、真实/反演隆升场、适应度历史和评价指标。正式实验时再按脚本顶部中文注释调大网格、种群和迭代次数。
+可选模式：
 
-### 重要提示
+- `main`：真实 DEM 主优化反演。默认 demo 会用内置 DEM 生成一组轻量但有意义的反演结果。
+- `synthetic`：合成地形验证实验。用于确认 Fastscape 正演、GA 反演和评价指标链路可用。
+- `k_sensitivity`：`scale_factor/K` 敏感性实验。用于比较不同降维因子对反演效果的影响。
 
-- **推荐使用一键配置脚本**，避免手动安装时的依赖冲突
-- 环境会被强制安装在项目目录下的 `.conda` 文件夹中；脚本即使复用系统/base conda，也会通过 `-p <项目路径>/.conda` 管理目标环境，并在安装后校验 `sys.prefix`
-- Jupyter 内核会自动注册，可直接在 Jupyter 中选择使用
-- 如遇到问题，请参考 [ENVIRONMENT_SETUP.md](ENVIRONMENT_SETUP.md) 中的常见问题部分
+旧入口 `main.py`、`run_synthetic_experiment.py`、`k_sensitivity_experiment.py` 仍保留为兼容 wrapper，但推荐始终使用 `python runner.py`。
 
-## 代码运行分为三种模式
+## 配置文件
 
-### 1. 合成地形实验
+普通用户只需要编辑 `config.ini`。每一项都有中文注释，说明参数含义和什么时候需要改。
 
-合成地形实验用于测试算法性能，使用人工生成的隆升场来验证算法能否有效地恢复原始隆升场。
+最常改的几项：
 
-#### 运行步骤：
-1. 确保所有代码文件在同一文件夹中
-2. 直接运行：
-   ```bash
-   python run_synthetic_experiment.py
-   ```
-   默认会跑一个轻量 `simple` 合成 demo，用于快速验证环境和算法流程。正式实验参数请按 `run_synthetic_experiment.py` 顶部中文注释修改。
+- `[Run] mode`：选择 `main`、`synthetic` 或 `k_sensitivity`。
+- `[Data] terrain_path`：真实 DEM 路径，`main` 模式必填。
+- `[Data] fault_shp_path`：断层 Shapefile，可填 `none` 跳过。
+- `[Data] study_area_shp_path`：研究区 Shapefile，可填 `none` 跳过。
+- `[Optimization] scale_factor`：隆升场降维因子，也就是 K。
+- `[Optimization] population_size`、`max_iterations`：GA 搜索规模。
+- `[Optimization] n_jobs`：并行任务数，Windows 首次 demo 建议保持 `1`。
 
-#### 主要参数（可在run_synthetic_experiment.py中修改）：
-- `shape`: 地形栅格大小，默认 demo 为 (64, 64)，正式实验可改为 (100, 100) 或更高
-- `patterns`: 测试的隆升模式，有'simple'（简单）, 'medium'（中等）, 'complex'（复杂）三种
-- `scale_factor`: 降维因子，越大运算越快但精度降低
-- `ga_params`: 遗传算法参数
-  - `pop`: 种群大小，默认100
-  - `max_iter`: 最大迭代次数，默认150
-  - `prob_cross`: 交叉概率，默认0.7
-  - `prob_mut`: 变异概率，默认0.05
-  - `lb`和`ub`: 隆升率上下限，单位mm/yr
+正式实验建议先用 demo 跑通，再逐步替换 DEM 和调大 GA 参数。
 
-#### 实验结果：
-结果将保存在`synthetic_experiments`目录下，包含：
-- 真实隆升场与反演隆升场的对比
-- 目标地形与模拟地形的对比
-- 适应度演化历史
-- 误差分析图表
+## 输出目录
 
-  
-### 2. 降维因子敏感性实验
+每次运行都会生成独立目录：
 
-降维因子(K)敏感性实验用于评估不同降维因子对反演结果的影响，帮助用户选择最佳的降维因子值。
+```text
+outputs/0001_2026-05-12_17-45-30_main/
+outputs/0002_2026-05-12_18-10-02_synthetic/
+```
 
-#### 运行步骤：
+目录结构固定：
 
-1. 确保所有代码文件在同一文件夹中
-2. 直接运行：
-   ```bash
-   python k_sensitivity_experiment.py
-   ```
-#### 主要参数（可在k_sensitivity_experiment.py中修改）：
+```text
+summary.md
+run_manifest.json
+config_used.ini
+logs/
+figures/
+arrays/
+metrics/
+```
 
-- k_values: 要测试的降维因子值列表，例如[3, 5, 7, 10, 15]
-- repetitions: 每个K值重复实验的次数，用于获取统计显著性
-- pattern: 测试的隆升模式，可选'simple'、'medium'或'complex'
-- shape: 地形栅格大小
-- ga_params: 遗传算法参数（与合成实验相同）
+优先打开 `summary.md`，里面有本次运行模式、关键参数、主要指标和输出位置。`run_manifest.json` 会记录 git commit、Python 版本、关键依赖版本、配置副本和输出文件清单。
 
-#### 实验结果：
+## Demo 数据
 
-结果将保存在sensitivity_experiments目录下，包含：
+仓库内置 `demo_data/demo_dem.tif` 和 `demo_data/demo_true_uplift.npy`，用于默认 `main` demo 的轻量验证。默认配置不要求断层或研究区 Shapefile；如果没有提供这些文件，程序会自动使用 DEM 全域和均一侵蚀系数场。
 
-- 综合分析图表：展示K值与RMSE、计算时间、R²的关系
-- 最佳K值推荐：基于精度和计算效率的综合评分
-- 不同K值的DEM和隆升场对比可视化
-- 详细的统计数据和性能指标
+## 常见调整
 
-#### 结果解读：
+运行慢：
 
-- RMSE vs 参数数量：展示精度与参数数量的权衡关系
-- K vs 计算时间：展示降维因子对计算效率的影响
-- K vs R²：展示降维因子对拟合质量的影响
-- 综合评分：结合精度和效率，推荐最佳K值
+- 减小 `[Optimization] population_size`
+- 减小 `[Optimization] max_iterations`
+- 增大 `[Optimization] scale_factor`
+- 大 DEM 先把 `[Optimization] ratio` 设为 `0.25` 或 `0.5`
 
-  
-### 3. 真实地形测试
+结果太粗：
 
-真实地形测试使用真实的DEM数据进行隆升场反演。
+- 减小 `[Optimization] scale_factor`
+- 增大 GA 种群和迭代数
+- 检查 `uplift_min` / `uplift_max` 是否覆盖合理隆升率范围
 
-#### 运行步骤：
-1. 默认 `config.ini` 已指向仓库内置 demo 数据，可直接运行；正式实验再替换 DEM、断层和研究区路径
-2. 运行：
-   ```bash
-   python main.py
-   ```
+路径错误：
 
-#### config.ini主要参数说明：
+- 使用绝对路径，或把数据放在项目目录下再用相对路径
+- Windows 路径可以写成 `C:/path/to/file.tif`
+- 可选 Shapefile 不使用时写 `none`
 
-**[Paths]部分**
-- `terrain_path`: DEM文件路径（支持.tif格式）
-- `fault_shp_path`: 断层shapefile文件路径；可留空，留空时使用均一侵蚀系数场
-- `study_area_shp_path`: 研究区shapefile文件路径；可留空，留空时使用 DEM 全域且不旋转
-- `output_path`: 结果输出目录
-
-**[Model]部分**
-- `k_sp_value`: 基础侵蚀系数，默认6.92e-6
-- `ksp_fault`: 断层带侵蚀系数，默认2e-5
-- `d_diff_value`: 坡地扩散系数，默认19.2
-- `boundary_status`: 边界条件，通常使用"fixed_value"
-- `area_exp`: 面积指数，默认0.42
-- `slope_exp`: 坡度指数，默认1.0
-- `time_total`: 总模拟时间（年），默认 demo 为 2e5；正式实验需根据研究区地质历史重新设置
-
-**[GeneticAlgorithm]部分**
-- `ga_pop_size`: 种群大小，越大探索能力越强但计算时间更长
-- `ga_max_iter`: 最大迭代次数
-- `ga_prob_cross`: 交叉概率
-- `ga_prob_mut`: 变异概率
-- `lb`和`ub`: 隆升率上下限，根据研究区实际情况设置，活跃造山带约1-10 mm/yr
-- `n_jobs`: 并行计算的进程数，-1表示使用所有CPU核心
-- `decay_rate`: 种群大小衰减率
-- `patience`: 早停耐心值，连续多少代无改进后停止
-- `random_seed`: 随机种子，默认 demo 固定为 42，便于不同电脑复现实例结果
-
-**[Preprocessing]部分**
-- `smooth_sigma`: 平滑系数
-- `scale_factor`: 降维因子，通常为5-10，越大运算越快但精度降低
-- `ratio`: DEM降采样比例，0-1之间
-- `target_crs`: 目标坐标系统（如需重投影）
-
-#### 运行结果：
-结果将保存在指定的输出目录下，包含：
-- 原始DEM和旋转后DEM的可视化
-- 侵蚀系数场可视化
-- 反演出的隆升率场
-- 基于该隆升场模拟的地形
-- 与目标地形的对比图
-- 默认 demo 的 `demo_metrics.txt` 和真实/反演隆升场对比图
-- 隆升率分布图
-- 3D地形可视化
-- 优化过程记录
-
-## 常见问题解决
-
-1. **内存不足**：
-   - 减小`ratio`值降低DEM分辨率
-   - 增大`scale_factor`值减小参数空间
-
-2. **运行时间过长**：
-   - 减小`ga_pop_size`和`ga_max_iter`
-   - 增大`n_jobs`使用更多CPU核心并行计算
-   - 增大`scale_factor`降低计算量
-
-3. **收敛性问题**：
-   - 根据研究区实际情况调整`lb`和`ub`限定更合理的搜索范围
-   - 增大`patience`允许更长的无改进迭代
-   - 检查侵蚀系数是否合理
-
-4. **坐标系统错误**：
-   - 确保所有输入文件使用相同的坐标系统
-   - 使用`target_crs`参数进行重投影
-   
 ## 引用
 
-如果您在研究中使用了本工具，请引用我们的论文：引用信息将在论文发表后更新
+如果您在研究中使用本工具，请引用相关论文。引用信息将在论文发表后更新。
 
-## 联系方式
+## 联系
 
-如有任何问题或建议，请联系：
-
-- 邮箱：[xiangzhao@zju.edu.cn](xiangzhao@zju.edu.cn)
+- xiangzhao@zju.edu.cn
