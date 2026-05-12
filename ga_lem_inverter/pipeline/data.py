@@ -157,7 +157,7 @@ def load_dem_data(file_path: str,
                     old_transform.c,  # 原点x
                     old_transform.f,  # 原点y
                     old_transform.a / ratio,  # 新的像素宽度
-                    old_transform.e / ratio   # 新的像素高度
+                    abs(old_transform.e) / ratio   # 新的像素高度，from_origin 会自动设置负 y 方向
                 )
                 profile.update({
                     'height': new_shape[0],

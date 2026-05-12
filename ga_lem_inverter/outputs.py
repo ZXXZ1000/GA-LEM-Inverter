@@ -46,6 +46,10 @@ class RunContext:
         return self.root / "metrics"
 
     @property
+    def tables_dir(self) -> Path:
+        return self.root / "tables"
+
+    @property
     def logs_dir(self) -> Path:
         return self.root / "logs"
 
@@ -73,7 +77,7 @@ def create_run_context(config_path: Path, config: configparser.ConfigParser, mod
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         run_root = output_base / f"{run_number:04d}_{timestamp}_{mode}"
         run_root.mkdir(parents=True, exist_ok=False)
-    for child in ("figures", "arrays", "metrics", "logs"):
+    for child in ("figures", "arrays", "metrics", "tables", "logs"):
         (run_root / child).mkdir(parents=True, exist_ok=True)
 
     context = RunContext(
@@ -171,6 +175,7 @@ def write_summary(context: RunContext) -> Path:
         "",
         "- 图像: `figures/`，文件名按生成顺序自动编号",
         "- 数组: `arrays/`",
+        "- 表格: `tables/`",
         "- 指标: `metrics/`",
         "- 日志: `logs/`",
         "- 配置副本: `config_used.ini`",

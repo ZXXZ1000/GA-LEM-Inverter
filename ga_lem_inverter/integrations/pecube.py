@@ -7,7 +7,7 @@ import json
 import os
 import shutil
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -33,6 +33,8 @@ class PecubeEngineConfig:
     sample_observations: Path | None = None
     total_time_myr: float = 1.0
     velocity_km_per_myr: float = 1.0
+    lon0: float = 0.0
+    lat0: float = 0.0
     dlon: float = 0.01
     dlat: float = 0.01
 
@@ -126,7 +128,8 @@ class PecubeEngine:
             sample_path = path_value("sample_observations", str(sample_raw))
 
         mode = config.get("Run", "mode", fallback="")
-        enabled_default = mode == "pecube_coupled"
+        has_sample_observations = sample_path is not None
+        enabled_default = mode == "pecube_coupled" or has_sample_observations
         engine_config = PecubeEngineConfig(
             enabled=bool_value("enabled", enabled_default),
             pecube_root=path_value("pecube_root", "vendor/pecube"),
@@ -139,10 +142,24 @@ class PecubeEngine:
             sample_observations=sample_path,
             total_time_myr=float_value("total_time_myr", 1.0),
             velocity_km_per_myr=float_value("velocity_km_per_myr", 1.0),
+            lon0=float_value("lon0", 0.0),
+            lat0=float_value("lat0", 0.0),
             dlon=float_value("dlon", 0.01),
             dlat=float_value("dlat", 0.01),
         )
         return cls(engine_config)
+
+    def with_spatial_grid(self, *, lon0: float, lat0: float, dlon: float, dlat: float) -> "PecubeEngine":
+        """Return a copy using DEM-derived Pecube grid coordinates."""
+        return PecubeEngine(
+            replace(
+                self.config,
+                lon0=float(lon0),
+                lat0=float(lat0),
+                dlon=float(dlon),
+                dlat=float(dlat),
+            )
+        )
 
     def validate(self) -> None:
         if not self.config.enabled:
@@ -179,6 +196,8 @@ class PecubeEngine:
                 dataset_name=self.config.dataset_name,
                 total_time_myr=self.config.total_time_myr,
                 velocity_km_per_myr=self.config.velocity_km_per_myr,
+                lon0=self.config.lon0,
+                lat0=self.config.lat0,
                 dlon=self.config.dlon,
                 dlat=self.config.dlat,
             )
@@ -189,7 +208,11 @@ class PecubeEngine:
             topography_series=topography_series,
             uplift_series=uplift_series,
             temperature_series=temperature_series,
-            sample_observations=observations,
+            # GA-LEM-Inverter uses a simple, documented observation CSV schema
+            # for Python-side loss calculation. Pecube's native data_folder
+            # format is stricter and differs by thermochronology system, so do
+            # not pass our normalized CSV into Pecube.in here.
+            sample_observations=None,
         )
 
         commands: list[PecubeCommandResult] = []

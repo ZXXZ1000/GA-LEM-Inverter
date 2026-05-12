@@ -26,6 +26,7 @@ logging.getLogger('tensorflow').setLevel(logging.ERROR)
 logging.getLogger('matplotlib').setLevel(logging.ERROR)
 np.seterr(all='ignore')
 from ga_lem_inverter.config import UserConfigError
+from ga_lem_inverter.integrations.pecube_fitness import PecubeFitnessEvaluator, pecube_grid_from_dem_profile
 from ga_lem_inverter.outputs import RunContext, write_metrics
 from ga_lem_inverter.pipeline.data import read_shapefile, load_dem_data, calculate_shp_rotation_angle, rotate_data, reproject_files_to_geographic
 from ga_lem_inverter.pipeline.preprocessing import interpolate_uplift_cv, unify_array_sizes
@@ -43,7 +44,46 @@ from ga_lem_inverter.pipeline.visualization import (
     plot_3d_surface,
     plot_optimization_history
 )
+
+
+def _config_int(
+    config: configparser.ConfigParser,
+    section: str,
+    option: str,
+    *,
+    fallback: int,
+    aliases: tuple[tuple[str, str], ...] = (),
+) -> int:
+    if config.has_option(section, option):
+        return config.getint(section, option)
+    for alias_section, alias_option in aliases:
+        if config.has_option(alias_section, alias_option):
+            return config.getint(alias_section, alias_option)
+    return fallback
+
+
+def _config_float(
+    config: configparser.ConfigParser,
+    section: str,
+    option: str,
+    *,
+    fallback: float,
+    aliases: tuple[tuple[str, str], ...] = (),
+) -> float:
+    if config.has_option(section, option):
+        return config.getfloat(section, option)
+    for alias_section, alias_option in aliases:
+        if config.has_option(alias_section, alias_option):
+            return config.getfloat(alias_section, alias_option)
+    return fallback
 from ga_lem_inverter.pipeline.path_validator import verify_config_paths, verify_file_path
+
+
+def _json_metric_value(value):
+    if isinstance(value, (int, float, np.integer, np.floating)):
+        return float(value)
+    return value
+
 
 # 在文件开头添加这些日志配置函数
 def setup_basic_logging():
@@ -86,7 +126,8 @@ def create_objective_function(resampled_dem, LOW_RES_SHAPE, ORIGINAL_SHAPE,
                            Ksp, D_DIFF, row, col, spacing, time_step_num,
                            total_simulation_time, terrain_resolution,
                            feature_smooth_radius, boundary_status='fixed_value',
-                           area_exp=0.43, slope_exp=1, use_lpips=True):
+                           area_exp=0.43, slope_exp=1, use_lpips=True,
+                           pecube_evaluator=None):
     """创建优化目标函数"""
     def objective_function(uplift_vector):
         try:
@@ -119,7 +160,16 @@ def create_objective_function(resampled_dem, LOW_RES_SHAPE, ORIGINAL_SHAPE,
                 use_lpips=use_lpips
             )
 
-            return 1 - similarity  # 最小化不相似度
+            terrain_loss = 1 - similarity  # 最小化不相似度
+            if pecube_evaluator is not None and pecube_evaluator.enabled:
+                result = pecube_evaluator.evaluate(
+                    terrain_loss=terrain_loss,
+                    generated_dem=generated_elevation,
+                    uplift=full_res_uplift,
+                )
+                return result.total_loss
+
+            return terrain_loss
 
         except Exception as e:
             logging.error(f"目标函数计算失败: {e}")
@@ -324,7 +374,13 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
 
         logging.info("配置文件加载完成")
 
-        random_seed = config.getint('GeneticAlgorithm', 'random_seed', fallback=42)
+        random_seed = _config_int(
+            config,
+            'Optimization',
+            'random_seed',
+            fallback=42,
+            aliases=(('GeneticAlgorithm', 'random_seed'),),
+        )
         np.random.seed(random_seed)
         logging.info(f"随机种子已固定: {random_seed}")
 
@@ -541,15 +597,15 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
         use_lpips = config.getboolean('Fitness', 'use_lpips', fallback=True)
 
         ga_params = {
-            'pop': config.getint('GeneticAlgorithm', 'ga_pop_size'),
-            'max_iter': config.getint('GeneticAlgorithm', 'ga_max_iter'),
-            'prob_cross': config.getfloat('GeneticAlgorithm', 'ga_prob_cross'),
-            'prob_mut': config.getfloat('GeneticAlgorithm', 'ga_prob_mut'),
-            'lb': config.getfloat('GeneticAlgorithm', 'lb'),
-            'ub': config.getfloat('GeneticAlgorithm', 'ub'),
-            'decay_rate': config.getfloat('GeneticAlgorithm', 'decay_rate'),
-            'min_size_pop': config.getint('GeneticAlgorithm', 'min_size_pop'),
-            'patience': config.getint('GeneticAlgorithm', 'patience'),
+            'pop': _config_int(config, 'Optimization', 'population_size', fallback=6, aliases=(('GeneticAlgorithm', 'ga_pop_size'),)),
+            'max_iter': _config_int(config, 'Optimization', 'max_iterations', fallback=5, aliases=(('GeneticAlgorithm', 'ga_max_iter'),)),
+            'prob_cross': _config_float(config, 'Optimization', 'cross_probability', fallback=0.7, aliases=(('GeneticAlgorithm', 'ga_prob_cross'),)),
+            'prob_mut': _config_float(config, 'Optimization', 'mutation_probability', fallback=0.05, aliases=(('GeneticAlgorithm', 'ga_prob_mut'),)),
+            'lb': _config_float(config, 'Optimization', 'uplift_min', fallback=0.0, aliases=(('GeneticAlgorithm', 'lb'),)),
+            'ub': _config_float(config, 'Optimization', 'uplift_max', fallback=8.0, aliases=(('GeneticAlgorithm', 'ub'),)),
+            'decay_rate': _config_float(config, 'Optimization', 'decay_rate', fallback=1.0, aliases=(('GeneticAlgorithm', 'decay_rate'),)),
+            'min_size_pop': _config_int(config, 'Optimization', 'min_population_size', fallback=4, aliases=(('GeneticAlgorithm', 'min_size_pop'),)),
+            'patience': _config_int(config, 'Optimization', 'patience', fallback=3, aliases=(('GeneticAlgorithm', 'patience'),)),
             'random_seed': random_seed
         }
 
@@ -562,6 +618,32 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
             'time_total': config.getfloat('Model', 'time_total'),
             'spacing': spacing
         }
+
+        pecube_evaluator = PecubeFitnessEvaluator.from_config(
+            config=config,
+            context=context,
+            target_dem=resampled_dem,
+            ksp=rotated_Ksp,
+            model_params=model_params,
+        )
+        if pecube_evaluator.enabled:
+            spatial_mode = config.get("Pecube", "spatial_grid", fallback="auto").strip().lower()
+            if spatial_mode in {"auto", "dem", "dem_profile"}:
+                if abs(rotation_angle) > 1e-9:
+                    raise ValueError(
+                        "当前 Pecube 自动坐标转换不支持旋转后的 DEM。"
+                        "请将 study_area_shp_path 设为 none，或先把 DEM 预处理成目标方向后再输入。"
+                    )
+                spatial_grid = pecube_grid_from_dem_profile(dem_profile, resampled_dem.shape)
+                if spatial_grid is not None:
+                    pecube_evaluator.apply_spatial_grid(spatial_grid)
+                    logging.info(
+                        "Pecube 空间网格已由 DEM 自动推导: "
+                        f"lon0={spatial_grid.lon0}, lat0={spatial_grid.lat0}, "
+                        f"dlon={spatial_grid.dlon}, dlat={spatial_grid.dlat}, crs={spatial_grid.crs}"
+                    )
+                else:
+                    logging.warning("DEM 缺少 CRS/transform，Pecube 使用 config.ini 中的 lon0/lat0/dlon/dlat。")
 
         # 创建objective function (使用 *旋转后* 的 resampled_dem 和 Ksp)
         obj_func = create_objective_function(
@@ -577,7 +659,8 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
             total_simulation_time=total_simulation_time,
             terrain_resolution=terrain_resolution,
             feature_smooth_radius=feature_smooth_radius,
-            use_lpips=use_lpips
+            use_lpips=use_lpips,
+            pecube_evaluator=pecube_evaluator
         )
 
         # 显示原始DEM
@@ -648,7 +731,7 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
 
         # 5. 遗传算法优化
         logging.info("Step 4: 遗传算法优化")
-        n_jobs = config.getint('GeneticAlgorithm', 'n_jobs')
+        n_jobs = _config_int(config, 'Optimization', 'n_jobs', fallback=1, aliases=(('GeneticAlgorithm', 'n_jobs'),))
 
         logging.info("Genetic Algorithm Parameters:")
         for key, value in ga_params.items():
@@ -777,7 +860,9 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
             demo_metrics.update({
                 'terrain_pearson': float(terrain_pearson),
                 'terrain_spearman': float(terrain_spearman),
-                'terrain_rmse': terrain_rmse
+                'terrain_rmse': terrain_rmse,
+                'terrain_loss': float(best_fitness) if not pecube_evaluator.enabled else float(pecube_evaluator.best_result.terrain_loss if pecube_evaluator.best_result else best_fitness),
+                'total_loss': float(best_fitness)
             })
             logging.info(
                 "Terrain metrics: "
@@ -790,7 +875,12 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
                 for key, value in demo_metrics.items():
                     metrics_file.write(f"{key} = {value:.6f}\n")
             context.add_artifact(metrics_txt_path)
-            write_metrics(context, "main_metrics.json", {k: float(v) for k, v in demo_metrics.items()})
+            pecube_metrics = pecube_evaluator.save_best_outputs(
+                generated_dem=final_elevation,
+                uplift=best_full_res_uplift,
+            )
+            demo_metrics.update(pecube_metrics)
+            write_metrics(context, "main_metrics.json", {k: float(v) if isinstance(v, (int, float, np.floating)) else v for k, v in demo_metrics.items()})
 
             plot_comparison(
                 data1=final_elevation,
@@ -876,7 +966,7 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
                 "optimization_time_seconds": float(end_time - start_time),
                 "original_shape": list(ORIGINAL_SHAPE),
                 "low_res_shape": list(LOW_RES_SHAPE),
-                **{k: float(v) for k, v in demo_metrics.items()},
+                **{k: _json_metric_value(v) for k, v in demo_metrics.items()},
             }
 
         else:

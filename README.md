@@ -83,14 +83,60 @@ mode = main
 - `[Data] study_area_shp_path`：研究区 Shapefile，可填 `none` 跳过。
 - `[Optimization] scale_factor`：隆升场降维因子，也就是 K。
 - `[Optimization] population_size`、`max_iterations`：GA 搜索规模。
-- `[Optimization] n_jobs`：并行任务数，Windows 首次 demo 建议保持 `1`。
-- `[Pecube] enabled`：默认 `auto`，会跟随 `[Run] mode` 自动启用或跳过 Pecube。
+- `[Optimization] n_jobs`：并行任务数；`-1` 使用全部 CPU 核心。Pecube 约束启用时，每个候选解会写入独立 `pecube/evaluations/eval_*` 目录，可以和 FastScape 一起并行。
+- `[Pecube] enabled`：默认 `auto`；配置了 `sample_observations` 时，`main` 模式会把 Pecube 热年代学 loss 接进 GA fitness。
+- `[Pecube] sample_observations`：热年代学样品 CSV；设为 `none` 即关闭 Pecube 约束。
+- `[Pecube] spatial_grid`：默认 `auto`，会从输入 DEM 的 CRS 和 transform 自动推导 Pecube 的 `lon0/lat0/dlon/dlat`。
+- `[Pecube] observation_coordinate_system`：默认 `geographic`，样品 CSV 使用真实 `lon,lat`；也可用 `projected/dem_crs` 输入 DEM 投影坐标，或用 `grid_index` 输入 DEM 行列索引。
+- `[Fitness] terrain_loss_weight` / `thermo_loss_weight`：组合目标函数权重。
+- `[Fitness] thermo_loss_scale`：把热年代学原始 normalized RMSE 压到 0-1 的尺度。
 
 正式实验建议先用 demo 跑通，再逐步替换 DEM 和调大 GA 参数。
 
 ## Pecube 耦合
 
-Pecube 以内置 vendor engine 形式接入。文件架构如下：
+Pecube 以内置 vendor engine 形式接入。它既可以用 `mode = pecube_coupled` 做独立 smoke 验证，也可以在 `mode = main` 中作为热年代学约束参与 GA 搜索。
+
+组合目标函数会先把两个约束归一化到 0-1，再做加权平均：
+
+```text
+terrain_loss = clip(terrain_loss_raw, 0, 1)
+thermo_loss = clip(thermo_loss_raw / thermo_loss_scale, 0, 1)
+total_loss = (
+    terrain_loss_weight * terrain_loss
+    + thermo_loss_weight * thermo_loss
+) / (terrain_loss_weight + thermo_loss_weight)
+```
+
+其中：
+
+- `terrain_loss_raw` 来自地形相似度，当前为 `1 - terrain_similarity`。
+- 对每个热年代学样品，Pecube 输出预测年龄 `predicted_age`，样品 CSV 提供实测年龄 `observed_age` 和误差 `sigma`。
+- 单个样品的归一化残差为 `(predicted_age - observed_age) / sigma`。
+- `thermo_loss_raw` 是所有样品归一化残差的 RMSE。
+- `thermo_loss_scale` 用来把热年代学 RMSE 压到 0-1，避免它因为数值量级大而压过地形约束。
+- `terrain_loss`、`thermo_loss`、`total_loss` 才是进入 GA 搜索的 0-1 loss；`terrain_loss_raw` 和 `thermo_loss_raw` 会保存在表格里用于诊断。
+
+样品 CSV 至少包含：
+
+```text
+sample_id,lon,lat,elevation,system,observed_age,sigma
+```
+
+默认 demo 样品在 `demo/data/demo_thermo_samples.csv`，使用真实经纬度 `lon,lat`。`main` 模式会读取 DEM 的 CRS/transform，把 DEM 网格自动转换为 Pecube 的经纬度网格；样品点会自动校验是否落在 DEM/Pecube 范围内。当前支持 `AHe`、`ZHe`、`AFT`、`ZFT` 和 Pecube 输出中的常见 Ar 系列列名。若不需要热年代学约束，把 `sample_observations = none`。
+
+启用后会新增这些输出：
+
+```text
+tables/predicted_thermochronology.csv
+tables/pecube_fitness_history.csv
+figures/*pecube_observed_vs_predicted_ages.png
+figures/*pecube_residual_spatial_map.png
+pecube/evaluations/
+pecube/best/
+```
+
+文件架构如下：
 
 ```text
 vendor/pecube/
@@ -105,10 +151,12 @@ ga_lem_inverter/integrations/
 ├── pecube.py              # PecubeEngine：对外 Python API，负责调用 Test/Pecube 并返回 PecubeResult
 ├── pecube_project.py      # PecubeProjectBuilder：把 FastScape 数组写成 Pecube.in + topo/uplift/temp 文件
 ├── pecube_parser.py       # PecubeOutputParser：读取 output/*.csv
-└── pecube_loss.py         # ThermochronologyLoss：热年代学观测 loss 的扩展点
+├── pecube_loss.py         # ThermochronologyLoss：旧扩展点
+└── pecube_fitness.py      # PecubeFitnessEvaluator：主优化中的热年代学 loss、预测表和图件
 
 ga_lem_inverter/workflows/
-└── pecube_coupled.py      # runner 的 pecube_coupled 模式，生成 FastScape 序列并交给 PecubeEngine
+├── main_inversion.py      # main 模式可选调用 PecubeFitnessEvaluator
+└── pecube_coupled.py      # pecube_coupled 模式，生成 FastScape 序列并交给 PecubeEngine
 ```
 
 调用链固定为：
@@ -116,11 +164,12 @@ ga_lem_inverter/workflows/
 ```text
 config.ini
   -> runner.py 读取 [Run] mode
-  -> ga_lem_inverter/workflows/pecube_coupled.py 生成 topography/uplift/temperature 序列
+  -> main_inversion.py 或 pecube_coupled.py 生成 topography/uplift/temperature 序列
   -> PecubeProjectBuilder 写 pecube/PGB01/input/Pecube.in 和 data/fastscape/topo0,uplift0,temp0...
   -> PecubeEngine 调 vendor/pecube/bin/Test 和 vendor/pecube/bin/Pecube
   -> PecubeOutputParser 读取 pecube/PGB01/output/*.csv
-  -> pecube/pecube_result.json 和 pecube/pecube_metrics.json
+  -> Python 按 sample_observations 抽取预测年龄并计算 thermo_loss
+  -> predicted_thermochronology.csv、pecube_fitness_history.csv 和图件
 ```
 
 Python API 入口是：
@@ -135,7 +184,7 @@ from ga_lem_inverter.integrations.pecube import PecubeEngine
 bash tools/environment/build_pecube.sh
 ```
 
-编译产物会写入 `vendor/pecube/bin/`，运行时 Pecube project 会写入本次输出目录的 `pecube/PGB01/`。`PGB01` 是 Pecube Fortran 程序兼容的 5 字符项目名。普通用户仍然只需要改 `config.ini`，把 `[Run] mode` 设为 `pecube_coupled`。
+编译产物会写入 `vendor/pecube/bin/`。独立 smoke 模式会把 Pecube project 写入 `pecube/PGB01/`；主优化会把每次评价写入 `pecube/evaluations/eval_*/PGB01/`，并把最佳可验证评价复制到 `pecube/best/`。`PGB01` 是 Pecube Fortran 程序兼容的 5 字符项目名。
 
 ## 输出目录
 
