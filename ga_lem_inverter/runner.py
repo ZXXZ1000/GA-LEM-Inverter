@@ -20,6 +20,7 @@ WORKFLOWS: dict[str, tuple[str, str]] = {
     "main": ("ga_lem_inverter.workflows.main_inversion", "run_main_workflow"),
     "synthetic": ("ga_lem_inverter.workflows.synthetic", "run_synthetic_workflow"),
     "k_sensitivity": ("ga_lem_inverter.workflows.k_sensitivity", "run_k_sensitivity_workflow"),
+    "pecube_coupled": ("ga_lem_inverter.workflows.pecube_coupled", "run_pecube_coupled_workflow"),
 }
 
 

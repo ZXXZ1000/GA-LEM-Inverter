@@ -368,7 +368,9 @@ $CondaPackages = @(
     "pytest=9.0.3",
     "black=26.3.1",
     "flake8=7.3.0",
-    "mypy=1.20.2"
+    "mypy=1.20.2",
+    "compilers=1.11.0",
+    "make=4.4.1"
 )
 
 $PipPackages = @(

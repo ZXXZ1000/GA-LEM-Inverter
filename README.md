@@ -67,6 +67,7 @@ mode = main
 - `main`：真实 DEM 主优化反演。默认 demo 会用内置 DEM 生成一组轻量但有意义的反演结果。
 - `synthetic`：合成地形验证实验。用于确认 Fastscape 正演、GA 反演和评价指标链路可用。
 - `k_sensitivity`：`scale_factor/K` 敏感性实验。用于比较不同降维因子对反演效果的影响。
+- `pecube_coupled`：FastScape 序列转 Pecube 的耦合 smoke 验证。首次使用前需要先编译内置 Pecube engine。
 
 旧入口 `main.py`、`run_synthetic_experiment.py`、`k_sensitivity_experiment.py` 仍保留为兼容 wrapper，但推荐始终使用 `python runner.py`。
 
@@ -76,15 +77,65 @@ mode = main
 
 最常改的几项：
 
-- `[Run] mode`：选择 `main`、`synthetic` 或 `k_sensitivity`。
+- `[Run] mode`：选择 `main`、`synthetic`、`k_sensitivity` 或 `pecube_coupled`。
 - `[Data] terrain_path`：真实 DEM 路径，`main` 模式必填。
 - `[Data] fault_shp_path`：断层 Shapefile，可填 `none` 跳过。
 - `[Data] study_area_shp_path`：研究区 Shapefile，可填 `none` 跳过。
 - `[Optimization] scale_factor`：隆升场降维因子，也就是 K。
 - `[Optimization] population_size`、`max_iterations`：GA 搜索规模。
 - `[Optimization] n_jobs`：并行任务数，Windows 首次 demo 建议保持 `1`。
+- `[Pecube] enabled`：默认 `auto`，会跟随 `[Run] mode` 自动启用或跳过 Pecube。
 
 正式实验建议先用 demo 跑通，再逐步替换 DEM 和调大 GA 参数。
+
+## Pecube 耦合
+
+Pecube 以内置 vendor engine 形式接入。文件架构如下：
+
+```text
+vendor/pecube/
+├── source/                # Pecube 上游 Fortran 源码、README、docs、LICENSE
+├── bin/                   # build_pecube.sh 编译出的 Pecube/Test/Vtk，可执行文件不提交
+├── build/                 # 预留构建缓存，不提交
+├── projects/              # 预留批量运行目录，不提交
+├── UPSTREAM.md            # 上游仓库、commit、license 记录
+└── LICENSE                # Pecube GPLv3 license 副本
+
+ga_lem_inverter/integrations/
+├── pecube.py              # PecubeEngine：对外 Python API，负责调用 Test/Pecube 并返回 PecubeResult
+├── pecube_project.py      # PecubeProjectBuilder：把 FastScape 数组写成 Pecube.in + topo/uplift/temp 文件
+├── pecube_parser.py       # PecubeOutputParser：读取 output/*.csv
+└── pecube_loss.py         # ThermochronologyLoss：热年代学观测 loss 的扩展点
+
+ga_lem_inverter/workflows/
+└── pecube_coupled.py      # runner 的 pecube_coupled 模式，生成 FastScape 序列并交给 PecubeEngine
+```
+
+调用链固定为：
+
+```text
+config.ini
+  -> runner.py 读取 [Run] mode
+  -> ga_lem_inverter/workflows/pecube_coupled.py 生成 topography/uplift/temperature 序列
+  -> PecubeProjectBuilder 写 pecube/PGB01/input/Pecube.in 和 data/fastscape/topo0,uplift0,temp0...
+  -> PecubeEngine 调 vendor/pecube/bin/Test 和 vendor/pecube/bin/Pecube
+  -> PecubeOutputParser 读取 pecube/PGB01/output/*.csv
+  -> pecube/pecube_result.json 和 pecube/pecube_metrics.json
+```
+
+Python API 入口是：
+
+```python
+from ga_lem_inverter.integrations.pecube import PecubeEngine
+```
+
+首次运行 Pecube 耦合模式前，先编译 Fortran engine：
+
+```bash
+bash tools/environment/build_pecube.sh
+```
+
+编译产物会写入 `vendor/pecube/bin/`，运行时 Pecube project 会写入本次输出目录的 `pecube/PGB01/`。`PGB01` 是 Pecube Fortran 程序兼容的 5 字符项目名。普通用户仍然只需要改 `config.ini`，把 `[Run] mode` 设为 `pecube_coupled`。
 
 ## 输出目录
 

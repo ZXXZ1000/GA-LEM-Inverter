@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 
-VALID_MODES = {"main", "synthetic", "k_sensitivity"}
+VALID_MODES = {"main", "synthetic", "k_sensitivity", "pecube_coupled"}
 
 
 class UserConfigError(ValueError):
@@ -123,7 +123,11 @@ def load_app_config(config_path: str | Path = "config.ini") -> AppConfig:
 
     _copy_legacy_sections(config)
     _clean_paths(config)
-    _resolve_paths(config, path.parent)
+    project_root = Path(__file__).resolve().parents[1]
+    # User-facing config paths are normally written relative to the repository
+    # root. This also keeps temporary config copies from redirecting demo output
+    # to /tmp on smoke tests or Windows launcher flows.
+    _resolve_paths(config, project_root)
     _validate_minimal_config(config, mode)
 
     return AppConfig(parser=config, path=path, mode=mode)

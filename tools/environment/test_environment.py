@@ -5,6 +5,7 @@
 """
 
 import importlib.metadata as md
+import shutil
 import sys
 
 
@@ -96,10 +97,19 @@ def test_imports():
         print(f"✗ compatibility import check failed: {e}")
         compatibility_ok = False
 
+    tool_ok = True
+    for tool in ("make", "gfortran"):
+        path = shutil.which(tool)
+        if path:
+            print(f"✓ {tool}: {path}")
+        else:
+            print(f"✗ {tool}: not found; Pecube build requires the conda compilers package")
+            tool_ok = False
+
     print("=" * 50)
     print(f"成功导入: {success_count}/{total_count} 个包")
     
-    if success_count == total_count and compatibility_ok:
+    if success_count == total_count and compatibility_ok and tool_ok:
         print("所有包导入成功，关键兼容版本正确。")
         return True
     else:

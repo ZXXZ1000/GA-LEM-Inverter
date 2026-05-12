@@ -20,6 +20,20 @@ demo/outputs/*
 /synthetic_experiments/
 /sensitivity_experiments/
 /results/
+vendor/pecube/bin/*
+!vendor/pecube/bin/.gitkeep
+vendor/pecube/build/*
+!vendor/pecube/build/.gitkeep
+vendor/pecube/projects/*
+!vendor/pecube/projects/.gitkeep
+vendor/pecube/tmp/
+vendor/pecube/LOG/
+vendor/pecube/source/src/*.o
+vendor/pecube/source/src/*.mod
+vendor/pecube/source/bin/Pecube
+vendor/pecube/source/bin/Test
+vendor/pecube/source/bin/Vtk
+vendor/pecube/source/docs/Publications/.DS_Store
 
 # Python cache and build artifacts
 __pycache__/
@@ -28,6 +42,8 @@ __pycache__/
 *.so
 .Python
 build/
+!vendor/pecube/build/
+!vendor/pecube/build/.gitkeep
 dist/
 downloads/
 eggs/

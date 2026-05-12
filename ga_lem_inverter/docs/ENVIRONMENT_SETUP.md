@@ -51,6 +51,18 @@ powershell -ExecutionPolicy Bypass -File .\tools\environment\setup_environment.p
 bash tools/environment/setup_environment.sh --install-base
 ```
 
+### 编译内置 Pecube
+
+Pecube 以 vendor 源码形式放在 `vendor/pecube/source/`。默认环境安装会把 `compilers=1.11.0` 和 `make=4.4.1` 安装进项目根目录的 `.conda`，用于编译 Fortran/C engine。使用 `[Run] mode = pecube_coupled` 前先编译出 `vendor/pecube/bin/Pecube`、`Test`、`Vtk`：
+
+```bash
+bash tools/environment/build_pecube.sh
+```
+
+运行时 Python 胶合层会在本次输出目录下生成 `pecube/PGB01/`。`PGB01` 是 Pecube Fortran 程序兼容的 5 字符项目名，用户不需要手动创建。
+
+如果脚本仍提示缺少 `gfortran` 或 `make`，先运行 `python tools/environment/test_environment.py` 看 `.conda` 是否完整；正常情况下不需要用户手动安装系统级编译器。
+
 ## 手动配置步骤
 
 如果需要手动配置，请按以下步骤操作：
@@ -289,6 +301,11 @@ bash tools/environment/setup_environment.sh
 ├── demo/                  # demo 输入和默认输出
 │   ├── data/              # 内置 DEM、真值隆升场和示例 shapefile
 │   └── outputs/           # 默认运行输出，内容不提交到代码库
+├── vendor/pecube/         # 内置 Pecube vendor engine
+│   ├── source/            # Pecube 原始源码和文档
+│   ├── bin/               # 编译后的 Pecube/Test/Vtk
+│   ├── build/             # 编译中间产物，不提交
+│   └── projects/          # 运行时 Pecube project，不提交
 ├── tools/environment/     # 环境安装、诊断和检查脚本
 │   ├── setup_environment.sh
 │   ├── setup_environment.ps1
