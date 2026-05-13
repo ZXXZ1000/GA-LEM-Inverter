@@ -100,6 +100,10 @@ mode = main
 
 Pecube 以内置 vendor engine 形式接入。它既可以用 `mode = pecube_coupled` 做独立 smoke 验证，也可以在 `mode = main` 中作为热年代学约束参与 GA 搜索。
 
+当前耦合边界需要明确：GA 优化的是一个二维空间隆升场，FastScape 使用这个同一个 uplift 场连续正演，并输出多时间步 DEM/topography 序列；Pecube 接收这组 DEM history 以及同一个 uplift 场重复形成的 uplift 序列来计算热年代学约束。也就是说，当前版本支持“静态空间 uplift 场 + 地形约束 + Pecube 热年代学约束”的联合反演。
+
+尚未实现的是“时间变化 uplift history”作为优化变量，即 `time x y x` 的隆升历史。原因在于当前使用的 FastScape/xarray-simlab `basic_model` 接口只声明 `uplift__rate` 支持标量或二维 `(y, x)` 场，不支持一次正演中直接输入带时间维的 uplift forcing。不能把一次 FastScape 正演硬拆成多个彼此独立的小正演来伪造 uplift history，因为那会丢掉连续地形状态。后续若要支持时间变化 uplift，需要先实现可靠的 FastScape 连续状态继承，或改用/扩展支持 time-varying uplift forcing 的 FastScape 接口。
+
 组合目标函数会先把两个约束归一化到 0-1，再做加权平均：
 
 ```text
