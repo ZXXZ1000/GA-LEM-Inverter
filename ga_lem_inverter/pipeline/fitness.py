@@ -10,6 +10,9 @@ import torch
 import lpips
 import logging
 
+_FEATURE_CACHE = {}
+_LPIPS_LOSS_FN = None
+
 def terrain_mae(matrix1, matrix2):
     """计算两个地形矩阵之间的平均绝对误差（Mean Absolute Error, MAE）"""
     return np.mean(np.abs(matrix1 - matrix2))
@@ -193,6 +196,33 @@ def extract_terrain_features(dem, resolution=347.4, smooth_radius=3):
         'hog': hog_features
     }
 
+def _array_cache_key(array, resolution, smooth_radius):
+    arr = np.ascontiguousarray(np.asarray(array, dtype=np.float64))
+    return (
+        arr.shape,
+        str(arr.dtype),
+        float(resolution),
+        int(smooth_radius),
+        hash(arr.tobytes()),
+    )
+
+
+def get_cached_terrain_features(dem, resolution=347.4, smooth_radius=3):
+    """进程级缓存固定 DEM 特征，避免 GA 每个候选解重复提取目标 DEM 特征。"""
+    key = _array_cache_key(dem, resolution, smooth_radius)
+    if key not in _FEATURE_CACHE:
+        _FEATURE_CACHE[key] = extract_terrain_features(dem, resolution, smooth_radius)
+    return _FEATURE_CACHE[key]
+
+
+def get_lpips_loss_fn():
+    """进程级缓存 LPIPS 模型；多进程时每个 worker 只加载一次。"""
+    global _LPIPS_LOSS_FN
+    if _LPIPS_LOSS_FN is None:
+        _LPIPS_LOSS_FN = lpips.LPIPS(net='alex', verbose=False)
+    return _LPIPS_LOSS_FN
+
+
 def compare_features(feature1, feature2):
     """
     比较两个地形特征
@@ -206,9 +236,14 @@ def compare_features(feature1, feature2):
         相似度分数
     """
     if isinstance(feature1, tuple):  # 对于高程曲线
-        return 1 - mean_squared_error(feature1[0], feature2[0]) / (np.var(feature1[0]) + np.var(feature2[0]))
-    else:
-        return 1 - mean_squared_error(feature1, feature2) / (np.var(feature1) + np.var(feature2))
+        variance_sum = np.var(feature1[0]) + np.var(feature2[0])
+        if variance_sum <= 1e-12:
+            return 1.0 if np.allclose(feature1[0], feature2[0]) else 0.0
+        return 1 - mean_squared_error(feature1[0], feature2[0]) / variance_sum
+    variance_sum = np.var(feature1) + np.var(feature2)
+    if variance_sum <= 1e-12:
+        return 1.0 if np.allclose(feature1, feature2) else 0.0
+    return 1 - mean_squared_error(feature1, feature2) / variance_sum
 
 def terrain_hash(dem, bits=256):
     """
@@ -290,7 +325,7 @@ def terrain_similarity(matrix1, matrix2, resolution=347.4, smooth_radius=3, use_
     返回:
     - total_sim: 综合相似度评分。
     """
-    logging.info(f"terrain_similarity: matrix1 type={type(matrix1)}, shape={matrix1.shape if hasattr(matrix1, 'shape') else 'None'}, matrix2 type={type(matrix2)}, shape={matrix2.shape if hasattr(matrix2, 'shape') else 'None'}")
+    logging.debug(f"terrain_similarity: matrix1 type={type(matrix1)}, shape={matrix1.shape if hasattr(matrix1, 'shape') else 'None'}, matrix2 type={type(matrix2)}, shape={matrix2.shape if hasattr(matrix2, 'shape') else 'None'}")
     try:
         matrix1 = np.asarray(matrix1, dtype=np.float64)
         matrix2 = np.asarray(matrix2, dtype=np.float64)
@@ -310,7 +345,7 @@ def terrain_similarity(matrix1, matrix2, resolution=347.4, smooth_radius=3, use_
         norm_matrix2 = normalize_relief(matrix2)
 
         # 提取两个 DEM 的相对地形特征，避免不同海拔基准或固定边界把适应度带偏。
-        features1 = extract_terrain_features(norm_matrix1, resolution, smooth_radius)
+        features1 = get_cached_terrain_features(norm_matrix1, resolution, smooth_radius)
         features2 = extract_terrain_features(norm_matrix2, resolution, smooth_radius)
 
         # 计算地形特征的相似度
@@ -333,24 +368,19 @@ def terrain_similarity(matrix1, matrix2, resolution=347.4, smooth_radius=3, use_
         normalized_mae = 1 - (mae / max_possible_mae)
 
         if use_lpips:
-            #深度学习模型
-            import torch
-            import lpips
             def terrain_perceptual_distance(matrix1, matrix2):
                 """添加警告过滤"""
                 import warnings
                 with warnings.catch_warnings():
                     warnings.filterwarnings("ignore", category=UserWarning)
-                    # 确保LPIPS只初始化一次
-                    if not hasattr(terrain_perceptual_distance, 'loss_fn'):
-                        terrain_perceptual_distance.loss_fn = lpips.LPIPS(
-                            net='alex',
-                            verbose=False  # 关闭verbose模式
-                        )
 
                     # 归一化到[-1, 1]范围
-                    matrix1 = (matrix1 - matrix1.min()) / (matrix1.max() - matrix1.min()) * 2 - 1
-                    matrix2 = (matrix2 - matrix2.min()) / (matrix2.max() - matrix2.min()) * 2 - 1
+                    range1 = matrix1.max() - matrix1.min()
+                    range2 = matrix2.max() - matrix2.min()
+                    if range1 <= 1e-12 or range2 <= 1e-12:
+                        return 0.0 if np.allclose(matrix1, matrix2) else 1.0
+                    matrix1 = (matrix1 - matrix1.min()) / range1 * 2 - 1
+                    matrix2 = (matrix2 - matrix2.min()) / range2 * 2 - 1
 
                     # 转换为PyTorch张量并添加通道维度
                     tensor1 = torch.from_numpy(matrix1).float().unsqueeze(0).unsqueeze(0).repeat(1, 3, 1, 1)
@@ -358,7 +388,7 @@ def terrain_similarity(matrix1, matrix2, resolution=347.4, smooth_radius=3, use_
 
                     # 使用缓存的LPIPS模型
                     with torch.no_grad():
-                        distance = terrain_perceptual_distance.loss_fn(tensor1, tensor2)
+                        distance = get_lpips_loss_fn()(tensor1, tensor2)
 
                     return distance.item()
 
