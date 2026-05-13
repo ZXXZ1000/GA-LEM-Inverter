@@ -51,7 +51,7 @@ def align_fastscape_inputs(k_sp, uplift, *, x_size, y_size):
     uplift_aligned = align_model_field(uplift, target_shape, label="uplift", order=1)
     return k_sp_aligned, uplift_aligned
 
-def run_fastscape_model(
+def run_fastscape_series(
     k_sp,
     uplift,
     k_diff,
@@ -62,10 +62,11 @@ def run_fastscape_model(
     area_exp=0.43,
     slope_exp=1,
     time_total=10e6,
-    initial_topography_seed=42
+    initial_topography_seed=42,
+    output_steps=21,
 ):
     """
-    运行 fastscape 模型。
+    运行 FastScape 模型并返回输出时间序列。
 
     参数:
     - k_sp: 侵蚀系数。
@@ -79,9 +80,10 @@ def run_fastscape_model(
     - slope_exp: 坡度指数。
     - time_total: 总模拟时间。
     - initial_topography_seed: 初始随机地形种子。固定种子可让 GA 目标函数可复现。
+    - output_steps: 输出地形序列帧数。
 
     返回:
-    - elevation: 模拟后的地形高程数据。
+    - elevation_series: 模拟地形时间序列，shape=(output_steps, y_size, x_size)。
     """
     try:
         logging.info(f"Fastscape input shapes:")
@@ -91,13 +93,15 @@ def run_fastscape_model(
 
         k_sp, uplift = align_fastscape_inputs(k_sp, uplift, x_size=x_size, y_size=y_size)
 
+        output_steps = max(2, int(output_steps))
+
         # 在运行模型前添加以下代码
         warnings.filterwarnings("ignore", category=FutureWarning,
                             message="variable .* with name matching its dimension")
         ds_in = xs.create_setup(
             model=basic_model,
             clocks={'time': np.linspace(0, time_total, 101),
-                    'out': np.linspace(0, time_total, 21)},
+                    'out': np.linspace(0, time_total, output_steps)},
             master_clock='time',
             input_vars={
                 'grid__shape': [y_size, x_size],
@@ -114,8 +118,38 @@ def run_fastscape_model(
                 'topography__elevation': 'out'}
         )
         out_ds = (ds_in.xsimlab.run(model=basic_model))
-        elevation = out_ds.topography__elevation.isel(out=-1).values
-        return elevation
+        return out_ds.topography__elevation.values
     except Exception as e:
         logging.error(f"运行 fastscape 模型出错: {e}")
         raise RuntimeError(f"运行 fastscape 模型出错: {e}")
+
+
+def run_fastscape_model(
+    k_sp,
+    uplift,
+    k_diff,
+    x_size,
+    y_size,
+    spacing,
+    boundary_status='fixed_value',
+    area_exp=0.43,
+    slope_exp=1,
+    time_total=10e6,
+    initial_topography_seed=42
+):
+    """运行 FastScape 模型并返回最终地形。"""
+    series = run_fastscape_series(
+        k_sp=k_sp,
+        uplift=uplift,
+        k_diff=k_diff,
+        x_size=x_size,
+        y_size=y_size,
+        spacing=spacing,
+        boundary_status=boundary_status,
+        area_exp=area_exp,
+        slope_exp=slope_exp,
+        time_total=time_total,
+        initial_topography_seed=initial_topography_seed,
+        output_steps=21,
+    )
+    return series[-1]

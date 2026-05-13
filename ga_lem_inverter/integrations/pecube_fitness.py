@@ -256,7 +256,14 @@ class PecubeFitnessEvaluator:
                 observation_crs=self.observation_crs,
             )
 
-    def evaluate(self, *, terrain_loss: float, generated_dem: np.ndarray, uplift: np.ndarray) -> PecubeConstraintResult:
+    def evaluate(
+        self,
+        *,
+        terrain_loss: float,
+        generated_dem: np.ndarray,
+        uplift: np.ndarray,
+        topography_series: np.ndarray | list[np.ndarray] | None = None,
+    ) -> PecubeConstraintResult:
         if not self.enabled:
             return PecubeConstraintResult(
                 enabled=False,
@@ -308,10 +315,16 @@ class PecubeFitnessEvaluator:
         try:
             generated_dem_pecube = self._to_pecube_grid(generated_dem)
             uplift_pecube = self._to_pecube_grid(uplift)
+            pecube_topographies = self._prepare_topography_series(
+                generated_dem_pecube=generated_dem_pecube,
+                topography_series=topography_series,
+            )
+            pecube_uplifts = [uplift_pecube for _ in pecube_topographies]
+            pecube_temperatures = [np.zeros_like(pecube_topographies[0]) for _ in pecube_topographies]
             result = self.engine.run(
-                topography_series=[self.target_dem_pecube, generated_dem_pecube],
-                uplift_series=[uplift_pecube, uplift_pecube],
-                temperature_series=[np.zeros_like(self.target_dem_pecube), np.zeros_like(self.target_dem_pecube)],
+                topography_series=pecube_topographies,
+                uplift_series=pecube_uplifts,
+                temperature_series=pecube_temperatures,
                 sample_observations=self.engine.config.sample_observations,
                 output_dir=eval_dir,
             )
@@ -466,6 +479,20 @@ class PecubeFitnessEvaluator:
         if self.spatial_adapter is None:
             return np.asarray(array, dtype=float)
         return self.spatial_adapter.transform_array(np.asarray(array, dtype=float))
+
+    def _prepare_topography_series(
+        self,
+        *,
+        generated_dem_pecube: np.ndarray,
+        topography_series: np.ndarray | list[np.ndarray] | None,
+    ) -> list[np.ndarray]:
+        if topography_series is None:
+            return [self.target_dem_pecube, generated_dem_pecube]
+        series = [self._to_pecube_grid(array) for array in np.asarray(topography_series, dtype=float)]
+        if len(series) < 2:
+            raise ValueError("Pecube topography_series 至少需要两帧。")
+        series[-1] = generated_dem_pecube
+        return series
 
     def _record(self, result: PecubeConstraintResult, *, evaluation_id: int) -> None:
         row = {

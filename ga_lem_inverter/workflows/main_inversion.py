@@ -30,7 +30,7 @@ from ga_lem_inverter.integrations.pecube_fitness import PecubeFitnessEvaluator, 
 from ga_lem_inverter.outputs import RunContext, write_metrics
 from ga_lem_inverter.pipeline.data import read_shapefile, load_dem_data, calculate_shp_rotation_angle, rotate_data, reproject_files_to_geographic
 from ga_lem_inverter.pipeline.preprocessing import interpolate_uplift_cv, unify_array_sizes
-from ga_lem_inverter.pipeline.forward_model import align_model_field, run_fastscape_model
+from ga_lem_inverter.pipeline.forward_model import align_model_field, run_fastscape_model, run_fastscape_series
 from ga_lem_inverter.pipeline.fitness import terrain_similarity
 from ga_lem_inverter.pipeline.optimization import optimize_uplift_ga
 from ga_lem_inverter.pipeline.erosion import create_erosion_field, display_erosion_field, verify_erosion_field
@@ -144,7 +144,7 @@ def create_objective_function(resampled_dem, LOW_RES_SHAPE, ORIGINAL_SHAPE,
                            total_simulation_time, terrain_resolution,
                            feature_smooth_radius, boundary_status='fixed_value',
                            area_exp=0.43, slope_exp=1, use_lpips=True,
-                           pecube_evaluator=None):
+                           pecube_evaluator=None, pecube_time_steps=2):
     """创建优化目标函数"""
     def objective_function(uplift_vector):
         try:
@@ -179,10 +179,26 @@ def create_objective_function(resampled_dem, LOW_RES_SHAPE, ORIGINAL_SHAPE,
 
             terrain_loss = 1 - similarity  # 最小化不相似度
             if pecube_evaluator is not None and pecube_evaluator.enabled:
+                topography_series = None
+                if pecube_time_steps > 2:
+                    topography_series = run_fastscape_series(
+                        k_sp=Ksp,
+                        uplift=full_res_uplift,
+                        k_diff=D_DIFF,
+                        x_size=col,
+                        y_size=row,
+                        spacing=spacing,
+                        boundary_status=boundary_status,
+                        area_exp=area_exp,
+                        slope_exp=slope_exp,
+                        time_total=total_simulation_time,
+                        output_steps=pecube_time_steps,
+                    )
                 result = pecube_evaluator.evaluate(
                     terrain_loss=terrain_loss,
                     generated_dem=generated_elevation,
                     uplift=full_res_uplift,
+                    topography_series=topography_series,
                 )
                 return result.total_loss
 
@@ -611,6 +627,7 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
         terrain_resolution = spacing # 可以添加到config文件中
         feature_smooth_radius = 2  # 可以添加到config文件中
         use_lpips = config.getboolean('Fitness', 'use_lpips', fallback=True)
+        pecube_time_steps = max(2, config.getint('Pecube', 'time_steps', fallback=2))
 
         ga_params = {
             'pop': _config_int(config, 'Optimization', 'population_size', fallback=6, aliases=(('GeneticAlgorithm', 'ga_pop_size'),)),
@@ -679,7 +696,8 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
             terrain_resolution=terrain_resolution,
             feature_smooth_radius=feature_smooth_radius,
             use_lpips=use_lpips,
-            pecube_evaluator=pecube_evaluator
+            pecube_evaluator=pecube_evaluator,
+            pecube_time_steps=pecube_time_steps,
         )
 
         # 显示原始DEM
