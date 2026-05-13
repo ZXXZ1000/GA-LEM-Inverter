@@ -96,6 +96,28 @@ def validate_low_resolution_shape(shape: tuple[int, int], scale_factor: int) -> 
     return low_res_shape
 
 
+def validate_rotation_spatial_constraints(
+    *,
+    rotation_angle: float,
+    pecube_enabled: bool,
+    pecube_spatial_mode: str,
+) -> dict[str, Any]:
+    """Validate spatial interpretation when DEM arrays are rotated."""
+    rotated = abs(float(rotation_angle)) > 1e-9
+    spatial_mode = str(pecube_spatial_mode or "auto").strip().lower()
+    if rotated and pecube_enabled and spatial_mode in {"auto", "dem", "dem_profile"}:
+        raise UserConfigError(
+            "当前配置同时启用了研究区旋转和 Pecube 自动 DEM 坐标。"
+            "旋转后的 DEM 矩阵没有可靠的地理 transform，不能直接用于真实样品坐标。"
+            "请将 study_area_shp_path 设为 none，或先在 GIS 中预处理 DEM 后再运行。"
+        )
+    return {
+        "dem_rotated": rotated,
+        "rotation_angle_degrees": float(rotation_angle),
+        "spatial_reference_mode": "rotated_matrix" if rotated else "dem_georeferenced",
+    }
+
+
 def _json_metric_value(value):
     if isinstance(value, (int, float, np.integer, np.floating)):
         return float(value)
@@ -660,14 +682,15 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
             ksp=rotated_Ksp,
             model_params=model_params,
         )
+        spatial_mode = config.get("Pecube", "spatial_grid", fallback="auto").strip().lower()
+        spatial_metrics = validate_rotation_spatial_constraints(
+            rotation_angle=rotation_angle,
+            pecube_enabled=pecube_evaluator.enabled,
+            pecube_spatial_mode=spatial_mode,
+        )
+        context.metrics.update(spatial_metrics)
         if pecube_evaluator.enabled:
-            spatial_mode = config.get("Pecube", "spatial_grid", fallback="auto").strip().lower()
             if spatial_mode in {"auto", "dem", "dem_profile"}:
-                if abs(rotation_angle) > 1e-9:
-                    raise ValueError(
-                        "当前 Pecube 自动坐标转换不支持旋转后的 DEM。"
-                        "请将 study_area_shp_path 设为 none，或先把 DEM 预处理成目标方向后再输入。"
-                    )
                 spatial_adapter = pecube_spatial_adapter_from_dem_profile(dem_profile, resampled_dem.shape)
                 if spatial_adapter is not None:
                     pecube_evaluator.apply_spatial_adapter(spatial_adapter)
