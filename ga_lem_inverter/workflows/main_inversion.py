@@ -186,18 +186,35 @@ def create_objective_function(resampled_dem, LOW_RES_SHAPE, ORIGINAL_SHAPE,
             full_res_uplift = interpolate_uplift_cv(uplift_vector, ORIGINAL_SHAPE)
 
             # 运行Fastscape模型
-            generated_elevation = run_fastscape_model(
-                k_sp=Ksp,
-                uplift=full_res_uplift,
-                k_diff=D_DIFF,
-                x_size=col,
-                y_size=row,
-                spacing=spacing,
-                boundary_status=boundary_status,
-                area_exp=area_exp,
-                slope_exp=slope_exp,
-                time_total=total_simulation_time
-            )
+            topography_series = None
+            if pecube_evaluator is not None and pecube_evaluator.enabled:
+                topography_series = run_fastscape_series(
+                    k_sp=Ksp,
+                    uplift=full_res_uplift,
+                    k_diff=D_DIFF,
+                    x_size=col,
+                    y_size=row,
+                    spacing=spacing,
+                    boundary_status=boundary_status,
+                    area_exp=area_exp,
+                    slope_exp=slope_exp,
+                    time_total=total_simulation_time,
+                    output_steps=max(2, pecube_time_steps),
+                )
+                generated_elevation = topography_series[-1]
+            else:
+                generated_elevation = run_fastscape_model(
+                    k_sp=Ksp,
+                    uplift=full_res_uplift,
+                    k_diff=D_DIFF,
+                    x_size=col,
+                    y_size=row,
+                    spacing=spacing,
+                    boundary_status=boundary_status,
+                    area_exp=area_exp,
+                    slope_exp=slope_exp,
+                    time_total=total_simulation_time
+                )
 
             # 计算地形相似度
             similarity = terrain_similarity(
@@ -210,26 +227,15 @@ def create_objective_function(resampled_dem, LOW_RES_SHAPE, ORIGINAL_SHAPE,
 
             terrain_loss = 1 - similarity  # 最小化不相似度
             if pecube_evaluator is not None and pecube_evaluator.enabled:
-                topography_series = None
-                if pecube_time_steps > 2:
-                    topography_series = run_fastscape_series(
-                        k_sp=Ksp,
-                        uplift=full_res_uplift,
-                        k_diff=D_DIFF,
-                        x_size=col,
-                        y_size=row,
-                        spacing=spacing,
-                        boundary_status=boundary_status,
-                        area_exp=area_exp,
-                        slope_exp=slope_exp,
-                        time_total=total_simulation_time,
-                        output_steps=pecube_time_steps,
-                    )
+                uplift_series = np.repeat(full_res_uplift[np.newaxis, :, :], len(topography_series), axis=0)
+                temperature_series = np.zeros_like(topography_series, dtype=float)
                 result = pecube_evaluator.evaluate(
                     terrain_loss=terrain_loss,
                     generated_dem=generated_elevation,
                     uplift=full_res_uplift,
                     topography_series=topography_series,
+                    uplift_series=uplift_series,
+                    temperature_series=temperature_series,
                 )
                 return result.total_loss
 

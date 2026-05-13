@@ -264,6 +264,8 @@ class PecubeFitnessEvaluator:
         generated_dem: np.ndarray,
         uplift: np.ndarray,
         topography_series: np.ndarray | list[np.ndarray] | None = None,
+        uplift_series: np.ndarray | list[np.ndarray] | None = None,
+        temperature_series: np.ndarray | list[np.ndarray] | None = None,
     ) -> PecubeConstraintResult:
         if not self.enabled:
             return PecubeConstraintResult(
@@ -320,8 +322,18 @@ class PecubeFitnessEvaluator:
                 generated_dem_pecube=generated_dem_pecube,
                 topography_series=topography_series,
             )
-            pecube_uplifts = [uplift_pecube for _ in pecube_topographies]
-            pecube_temperatures = [np.zeros_like(pecube_topographies[0]) for _ in pecube_topographies]
+            pecube_uplifts = self._prepare_model_series(
+                series=uplift_series,
+                fallback_array=uplift_pecube,
+                expected_len=len(pecube_topographies),
+                label="uplift_series",
+            )
+            pecube_temperatures = self._prepare_model_series(
+                series=temperature_series,
+                fallback_array=np.zeros_like(pecube_topographies[0]),
+                expected_len=len(pecube_topographies),
+                label="temperature_series",
+            )
             result = self.engine.run(
                 topography_series=pecube_topographies,
                 uplift_series=pecube_uplifts,
@@ -348,6 +360,9 @@ class PecubeFitnessEvaluator:
                     "terrain_loss_raw": float(terrain_loss),
                     "thermo_loss_raw": thermo_loss_raw,
                     "thermo_loss_scale": self.thermo_loss_scale,
+                    "pecube_topography_frames": len(pecube_topographies),
+                    "pecube_uplift_frames": len(pecube_uplifts),
+                    "pecube_temperature_frames": len(pecube_temperatures),
                 },
             )
             self._record(constraint, evaluation_id=evaluation_id)
@@ -494,6 +509,23 @@ class PecubeFitnessEvaluator:
             raise ValueError("Pecube topography_series 至少需要两帧。")
         series[-1] = generated_dem_pecube
         return series
+
+    def _prepare_model_series(
+        self,
+        *,
+        series: np.ndarray | list[np.ndarray] | None,
+        fallback_array: np.ndarray,
+        expected_len: int,
+        label: str,
+    ) -> list[np.ndarray]:
+        if expected_len < 2:
+            raise ValueError(f"Pecube {label} 需要至少两帧，当前 {expected_len}。")
+        if series is None:
+            return [np.asarray(fallback_array, dtype=float).copy() for _ in range(expected_len)]
+        prepared = [self._to_pecube_grid(array) for array in np.asarray(series, dtype=float)]
+        if len(prepared) != expected_len:
+            raise ValueError(f"Pecube {label} 帧数必须等于 topography_series，期望 {expected_len}，得到 {len(prepared)}。")
+        return prepared
 
     def _record(self, result: PecubeConstraintResult, *, evaluation_id: int) -> None:
         row = {
