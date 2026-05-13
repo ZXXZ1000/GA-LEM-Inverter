@@ -17,7 +17,9 @@ def clip_and_rasterize(
     line_shp_path: str,
     polygon_shp_path: str,
     matrix_shape: Tuple[int, int],
-    rotation_angle: float = 0
+    rotation_angle: float = 0,
+    raster_transform: Optional[Affine] = None,
+    raster_crs: Optional[Union[str, object]] = None,
 ):
     """
     裁切和栅格化断层线
@@ -31,8 +33,15 @@ def clip_and_rasterize(
             logging.warning("输入shapefile为空")
             return np.zeros(matrix_shape, dtype=np.uint8), None
 
-        # 2. 统一坐标系
-        if polygon_gdf.crs != line_gdf.crs:
+        # 2. 统一坐标系。优先对齐到 DEM 栅格 CRS，这样断层/研究区/DEM 共用同一个 transform。
+        target_crs = raster_crs or polygon_gdf.crs or line_gdf.crs
+        if target_crs is not None:
+            if polygon_gdf.crs != target_crs:
+                polygon_gdf = polygon_gdf.to_crs(target_crs)
+            if line_gdf.crs != target_crs:
+                line_gdf = line_gdf.to_crs(target_crs)
+            logging.info(f"研究区和断层已投影至栅格坐标系: {target_crs}")
+        elif polygon_gdf.crs != line_gdf.crs:
             polygon_gdf = polygon_gdf.to_crs(line_gdf.crs)
             logging.info(f"研究区已投影至断层坐标系: {line_gdf.crs}")
 
@@ -42,14 +51,17 @@ def clip_and_rasterize(
             logging.warning("断层线与研究区无交集")
             return np.zeros(matrix_shape, dtype=np.uint8), None
 
-        # 4. 计算变换矩阵
-        bounds = polygon_gdf.total_bounds
-        transform = from_origin(
-            bounds[0],  # minx
-            bounds[3],  # maxy
-            (bounds[2] - bounds[0]) / matrix_shape[1],  # pixel width
-            (bounds[3] - bounds[1]) / matrix_shape[0]   # pixel height
-        )
+        # 4. 使用 DEM transform 栅格化；没有传入时才退回旧的研究区 bounds transform。
+        if raster_transform is not None:
+            transform = raster_transform
+        else:
+            bounds = polygon_gdf.total_bounds
+            transform = from_origin(
+                bounds[0],  # minx
+                bounds[3],  # maxy
+                (bounds[2] - bounds[0]) / matrix_shape[1],  # pixel width
+                (bounds[3] - bounds[1]) / matrix_shape[0]   # pixel height
+            )
 
         # 5. 栅格化断层线
         fault_raster = rasterize(
@@ -71,8 +83,10 @@ def clip_and_rasterize(
             dtype=np.uint8
         )
 
-        # 7. 应用掩膜并处理研究区外的值
-        final_raster = np.where(mask == 1, fault_raster, np.nan)
+        # 7. 应用掩膜并处理研究区外的值。
+        # 如果使用 DEM transform 栅格化，输出必须保留 DEM 原始 shape，
+        # 不能再按研究区 NaN 边缘裁剪，否则 Ksp 与 DEM 像素坐标会错位。
+        final_raster = fault_raster if raster_transform is not None else np.where(mask == 1, fault_raster, np.nan)
 
         return final_raster, transform
 
@@ -87,7 +101,9 @@ def create_erosion_field(shape: Tuple[int, int],
                         fault_shp_path: str,
                         study_area_shp_path: str,
                         rotation_angle: float = 0,
-                        border_width: int = 2) -> np.ndarray:
+                        border_width: int = 2,
+                        raster_transform: Optional[Affine] = None,
+                        raster_crs: Optional[Union[str, object]] = None) -> np.ndarray:
     """
     4. 创建基础侵蚀系数场并添加断层弱抗性带
     """
@@ -102,15 +118,19 @@ def create_erosion_field(shape: Tuple[int, int],
             fault_shp_path,
             study_area_shp_path,
             matrix_shape=(row, col),
-            rotation_angle=rotation_angle
+            rotation_angle=rotation_angle,
+            raster_transform=raster_transform,
+            raster_crs=raster_crs,
         )
 
         Ksp += line_raster * fault_k_sp
         # 旋转
         if rotation_angle != 0:
             Ksp = rotate_data(Ksp, rotation_angle)
-        # 裁剪掉 NaN 值，保留有效区域
-        Ksp = trim_nan_edges(Ksp)
+        # 旧路径没有 DEM transform，只能按研究区有效范围裁边；DEM transform 路径
+        # 必须保留原始 DEM shape，后续和 DEM 一起旋转/重采样。
+        if raster_transform is None:
+            Ksp = trim_nan_edges(Ksp)
         # 设置边界条件
         Ksp[:border_width, :] = 0  # 下边界
         Ksp[-border_width:, :] = 0  # 上边界

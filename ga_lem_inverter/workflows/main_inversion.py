@@ -548,7 +548,9 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
                 fault_shp_path=fault_shp_path,
                 study_area_shp_path=study_area_shp_path,
                 rotation_angle=0,
-                border_width=2
+                border_width=2,
+                raster_transform=dem_profile.get("transform"),
+                raster_crs=dem_profile.get("crs"),
             )
             logging.info("已根据断层 Shapefile 创建非均一侵蚀系数场")
         else:
