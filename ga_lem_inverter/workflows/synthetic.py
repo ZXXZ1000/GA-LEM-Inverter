@@ -54,6 +54,12 @@ def run_synthetic_workflow(config, context: RunContext) -> dict[str, Any]:
 
 class SyntheticExperiment:
     def __init__(self, config_path: str = None):
+        warnings.warn(
+            "SyntheticExperiment 是旧兼容类。普通用户和新代码请通过 config.ini 设置 mode=synthetic，"
+            "然后运行 python runner.py。",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         """
         初始化实验设置
 

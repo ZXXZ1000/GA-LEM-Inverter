@@ -7,6 +7,7 @@ import time
 import os
 import json
 import logging
+import warnings
 from datetime import datetime
 from scipy.stats import pearsonr
 from sklearn.metrics import mean_squared_error
@@ -79,6 +80,12 @@ class KSensitivityExperiment:
     """Experiment to evaluate sensitivity to scaling factor K"""
 
     def __init__(self, base_output_dir='sensitivity_experiments'):
+        warnings.warn(
+            "KSensitivityExperiment 是旧兼容类。普通用户和新代码请通过 config.ini 设置 mode=k_sensitivity，"
+            "然后运行 python runner.py。",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         """
         Initialize the experiment
 

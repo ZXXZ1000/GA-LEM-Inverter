@@ -69,6 +69,8 @@ mode = main
 - `k_sensitivity`：`scale_factor/K` 敏感性实验。用于比较不同降维因子对反演效果的影响。
 - `pecube_coupled`：FastScape 序列转 Pecube 的耦合 smoke 验证。正常安装完成后可直接运行。
 
+普通用户和新脚本都应通过 `python runner.py` 加 `config.ini` 的 `[Run] mode` 运行。`SyntheticExperiment`、`KSensitivityExperiment` 等旧类只保留兼容用途，不作为新的使用入口。
+
 旧入口 `main.py`、`run_synthetic_experiment.py`、`k_sensitivity_experiment.py` 仍保留为兼容 wrapper，但推荐始终使用 `python runner.py`。
 
 ## 配置文件
