@@ -22,8 +22,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 from pyproj import Transformer
 from rasterio.crs import CRS
-from rasterio.transform import Affine, array_bounds
-from rasterio.warp import Resampling, calculate_default_transform, reproject
+from rasterio.transform import Affine, from_bounds
+from rasterio.warp import transform_bounds
+from rasterio.warp import Resampling, reproject
 
 from ga_lem_inverter.integrations.pecube import PecubeEngine
 from ga_lem_inverter.integrations.pecube_parser import PecubeParsedOutput
@@ -108,7 +109,7 @@ class PecubeSpatialAdapter:
             raise ValueError(f"Pecube 输入数组 shape={array.shape} 与 DEM shape={self.source_shape} 不一致。")
         if not self.resample:
             return array.copy()
-        destination = np.empty(self.target_shape, dtype=float)
+        destination = np.full(self.target_shape, np.nan, dtype=float)
         reproject(
             source=array,
             destination=destination,
@@ -780,18 +781,14 @@ def pecube_spatial_adapter_from_dem_profile(profile: dict[str, Any], shape: tupl
         target_shape = (rows, cols)
         resample = False
     else:
-        left, bottom, right, top = array_bounds(rows, cols, affine)
-        target_transform, width, height = calculate_default_transform(
+        left, bottom, right, top = transform_bounds(
             crs_obj,
             "EPSG:4326",
-            cols,
-            rows,
-            left,
-            bottom,
-            right,
-            top,
+            *_affine_outer_bounds(rows, cols, affine),
+            densify_pts=21,
         )
-        target_shape = (height, width)
+        target_transform = from_bounds(left, bottom, right, top, cols, rows)
+        target_shape = (rows, cols)
         resample = True
 
     grid = _grid_from_geographic_transform(
@@ -808,6 +805,18 @@ def pecube_spatial_adapter_from_dem_profile(profile: dict[str, Any], shape: tupl
         target_shape=target_shape,
         resample=resample,
     )
+
+
+def _affine_outer_bounds(rows: int, cols: int, transform: Affine) -> tuple[float, float, float, float]:
+    corners = [
+        transform * (0, 0),
+        transform * (cols, 0),
+        transform * (0, rows),
+        transform * (cols, rows),
+    ]
+    xs = [point[0] for point in corners]
+    ys = [point[1] for point in corners]
+    return min(xs), min(ys), max(xs), max(ys)
 
 
 def pecube_grid_from_dem_profile(profile: dict[str, Any], shape: tuple[int, int]) -> PecubeSpatialGrid | None:

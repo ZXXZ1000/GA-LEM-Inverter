@@ -14,6 +14,7 @@ import logging
 import rasterio
 import rasterio.mask
 import geopandas as gpd
+from math import ceil
 from typing import Tuple, Optional
 import logging
 import os
@@ -22,6 +23,8 @@ from scipy.ndimage import rotate
 from ga_lem_inverter.pipeline.spatial import SpatialProcessor
 import configparser
 from rasterio import warp
+from rasterio.transform import Affine
+from rasterio.warp import Resampling, reproject
 
 
 
@@ -228,6 +231,121 @@ def rotate_data(data: np.ndarray, angle: float,
     except Exception as e:
         logging.error(f"Error rotating data: {e}")
         raise
+
+
+def build_rotated_profile_from_study_area(
+    profile: dict,
+    study_area_shp_path: str,
+    spacing: float,
+) -> dict:
+    """
+    根据研究区最小外接旋转矩形建立一个带真实 transform 的旋转栅格 profile。
+
+    这个函数用于替代单纯的 ndarray 旋转：输出网格仍在 DEM 的 CRS 中，只是像素
+    x/y 轴沿研究区主方向排列。后续 Pecube 从该 profile 推导样品坐标时，样品点
+    和旋转后的 DEM/Ksp 会处在同一套空间参考下。
+    """
+    if "transform" not in profile or profile.get("crs") is None:
+        raise ValueError("DEM profile 缺少 transform 或 CRS，无法建立旋转后的空间参考。")
+    if spacing <= 0:
+        raise ValueError(f"旋转栅格 spacing 必须大于 0，当前为 {spacing}。")
+
+    crs = profile.get("crs")
+    study_area = read_shapefile(study_area_shp_path)
+    if study_area.crs is not None and study_area.crs != crs:
+        study_area = study_area.to_crs(crs)
+
+    geometry = study_area.geometry.union_all() if hasattr(study_area.geometry, "union_all") else study_area.geometry.unary_union
+    if geometry.is_empty:
+        raise ValueError("研究区 Shapefile 为空，无法建立旋转栅格。")
+
+    rectangle = geometry.minimum_rotated_rectangle
+    coords = np.asarray(rectangle.exterior.coords[:-1], dtype=float)
+    if coords.shape[0] < 4:
+        raise ValueError("研究区最小外接矩形无效，无法建立旋转栅格。")
+
+    edges = np.roll(coords, -1, axis=0) - coords
+    lengths = np.linalg.norm(edges, axis=1)
+    longest_index = int(np.argmax(lengths))
+    if lengths[longest_index] <= 0:
+        raise ValueError("研究区最小外接矩形边长无效，无法建立旋转栅格。")
+
+    x_unit = edges[longest_index] / lengths[longest_index]
+    y_unit = np.array([-x_unit[1], x_unit[0]], dtype=float)
+
+    x_projection = coords @ x_unit
+    y_projection = coords @ y_unit
+    min_x, max_x = float(np.min(x_projection)), float(np.max(x_projection))
+    min_y, max_y = float(np.min(y_projection)), float(np.max(y_projection))
+    width = max_x - min_x
+    height = max_y - min_y
+    if width <= 0 or height <= 0:
+        raise ValueError("研究区旋转栅格宽高无效，无法继续。")
+
+    cols = max(2, int(ceil(width / spacing)))
+    rows = max(2, int(ceil(height / spacing)))
+    top_left = x_unit * min_x + y_unit * max_y
+
+    rotated_transform = Affine(
+        x_unit[0] * spacing,
+        -y_unit[0] * spacing,
+        top_left[0],
+        x_unit[1] * spacing,
+        -y_unit[1] * spacing,
+        top_left[1],
+    )
+
+    rotated_profile = profile.copy()
+    rotated_profile.update(
+        {
+            "height": rows,
+            "width": cols,
+            "transform": rotated_transform,
+            "crs": crs,
+            "dtype": "float32",
+            "nodata": np.nan,
+        }
+    )
+    return rotated_profile
+
+
+def reproject_array_to_profile(
+    array: np.ndarray,
+    src_profile: dict,
+    dst_profile: dict,
+    *,
+    resampling: Resampling = Resampling.bilinear,
+) -> np.ndarray:
+    """把数组从 src_profile 的空间参考重采样到 dst_profile。"""
+    if "transform" not in src_profile or src_profile.get("crs") is None:
+        raise ValueError("源 profile 缺少 transform 或 CRS，无法重采样。")
+    if "transform" not in dst_profile or dst_profile.get("crs") is None:
+        raise ValueError("目标 profile 缺少 transform 或 CRS，无法重采样。")
+
+    src_transform = src_profile["transform"]
+    dst_transform = dst_profile["transform"]
+    if not isinstance(src_transform, Affine):
+        src_transform = Affine(*tuple(src_transform)[:6])
+    if not isinstance(dst_transform, Affine):
+        dst_transform = Affine(*tuple(dst_transform)[:6])
+
+    destination = np.full(
+        (int(dst_profile["height"]), int(dst_profile["width"])),
+        np.nan,
+        dtype=np.float32,
+    )
+    reproject(
+        source=np.asarray(array, dtype=np.float32),
+        destination=destination,
+        src_transform=src_transform,
+        src_crs=src_profile["crs"],
+        src_nodata=np.nan,
+        dst_transform=dst_transform,
+        dst_crs=dst_profile["crs"],
+        dst_nodata=np.nan,
+        resampling=resampling,
+    )
+    return destination
 
 
 def read_terrain_data(tiff_path, rotation_angle=0):

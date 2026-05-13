@@ -28,7 +28,16 @@ np.seterr(all='ignore')
 from ga_lem_inverter.config import UserConfigError
 from ga_lem_inverter.integrations.pecube_fitness import PecubeFitnessEvaluator, pecube_spatial_adapter_from_dem_profile
 from ga_lem_inverter.outputs import RunContext, write_metrics
-from ga_lem_inverter.pipeline.data import read_shapefile, load_dem_data, calculate_shp_rotation_angle, rotate_data, reproject_files_to_geographic
+from rasterio.warp import Resampling
+from ga_lem_inverter.pipeline.data import (
+    read_shapefile,
+    load_dem_data,
+    calculate_shp_rotation_angle,
+    rotate_data,
+    reproject_files_to_geographic,
+    build_rotated_profile_from_study_area,
+    reproject_array_to_profile,
+)
 from ga_lem_inverter.pipeline.preprocessing import interpolate_uplift_cv, unify_array_sizes
 from ga_lem_inverter.pipeline.forward_model import align_model_field, run_fastscape_model, run_fastscape_series
 from ga_lem_inverter.pipeline.fitness import terrain_similarity
@@ -105,16 +114,16 @@ def validate_rotation_spatial_constraints(
     """Validate spatial interpretation when DEM arrays are rotated."""
     rotated = abs(float(rotation_angle)) > 1e-9
     spatial_mode = str(pecube_spatial_mode or "auto").strip().lower()
-    if rotated and pecube_enabled and spatial_mode in {"auto", "dem", "dem_profile"}:
-        raise UserConfigError(
-            "当前配置同时启用了研究区旋转和 Pecube 自动 DEM 坐标。"
-            "旋转后的 DEM 矩阵没有可靠的地理 transform，不能直接用于真实样品坐标。"
-            "请将 study_area_shp_path 设为 none，或先在 GIS 中预处理 DEM 后再运行。"
+    if rotated and pecube_enabled and spatial_mode not in {"auto", "dem", "dem_profile"}:
+        logging.warning(
+            "已启用 DEM 旋转和 Pecube，但 Pecube spatial_grid=%s 不是 DEM 自动模式；"
+            "请确认样品坐标与手动 Pecube 网格一致。",
+            spatial_mode,
         )
     return {
         "dem_rotated": rotated,
         "rotation_angle_degrees": float(rotation_angle),
-        "spatial_reference_mode": "rotated_matrix" if rotated else "dem_georeferenced",
+        "spatial_reference_mode": "rotated_georeferenced" if rotated else "dem_georeferenced",
     }
 
 
@@ -538,7 +547,7 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
                 fault_k_sp=ksp_fault,
                 fault_shp_path=fault_shp_path,
                 study_area_shp_path=study_area_shp_path,
-                rotation_angle=rotation_angle,
+                rotation_angle=0,
                 border_width=2
             )
             logging.info("已根据断层 Shapefile 创建非均一侵蚀系数场")
@@ -550,15 +559,54 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
             )
             logging.info("已创建均一侵蚀系数场")
 
+        if Ksp.shape != ORIGINAL_SHAPE:
+            logging.warning(
+                "Ksp shape=%s 与 DEM shape=%s 不一致，将在旋转前自动对齐。",
+                Ksp.shape,
+                ORIGINAL_SHAPE,
+            )
+            Ksp = align_model_field(Ksp, ORIGINAL_SHAPE, label="Ksp", order=1)
+            safe_border = min(2, max(ORIGINAL_SHAPE[0] // 2, 0), max(ORIGINAL_SHAPE[1] // 2, 0))
+            if safe_border > 0:
+                Ksp[:safe_border, :] = 0
+                Ksp[-safe_border:, :] = 0
+                Ksp[:, :safe_border] = 0
+                Ksp[:, -safe_border:] = 0
+
         if not verify_erosion_field(Ksp, shape=ORIGINAL_SHAPE):
             logging.error("侵蚀系数场验证失败")
             return
 
         # 3. 旋转 DEM 和 Ksp Field (一起旋转)
         logging.info("Step 3: 旋转 DEM 和侵蚀系数场")
-        rotated_dem_data = rotate_data(dem_data, rotation_angle)
+        spacing_x = abs(dem_profile['transform'][0])
+        spacing_y = abs(dem_profile['transform'][4])
+        spacing = (spacing_x + spacing_y) / 2
+        if study_area_shp_path and abs(rotation_angle) > 1e-9 and dem_profile.get("crs") is not None:
+            rotated_profile = build_rotated_profile_from_study_area(
+                dem_profile,
+                study_area_shp_path,
+                spacing=spacing,
+            )
+            rotated_dem_data = reproject_array_to_profile(
+                dem_data,
+                dem_profile,
+                rotated_profile,
+                resampling=Resampling.bilinear,
+            )
+            rotated_Ksp = reproject_array_to_profile(
+                Ksp,
+                dem_profile,
+                rotated_profile,
+                resampling=Resampling.bilinear,
+            )
+            dem_profile = rotated_profile
+            logging.info("已使用带 transform 的旋转投影网格同步重采样 DEM 和 Ksp。")
+        else:
+            rotated_dem_data = rotate_data(dem_data, rotation_angle)
+            rotated_Ksp = rotate_data(Ksp, rotation_angle)
+
         rotated_dem_data = fill_Nan(rotated_dem_data)
-        rotated_Ksp = Ksp
         rotated_Ksp = fill_Nan(rotated_Ksp)
 
         # 添加详细的尺寸日志
@@ -615,7 +663,7 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
             raise ValueError("Shape validation failed")
 
         resampled_dem = rotated_dem_data #  重命名 rotated_dem_data 为 resampled_dem 以便后续代码兼容
-        spacing_x = dem_profile['transform'][0]
+        spacing_x = abs(dem_profile['transform'][0])
         spacing_y = abs(dem_profile['transform'][4])
         spacing = (spacing_x + spacing_y) / 2 # 计算 spacing (可能需要更精确的计算)
 

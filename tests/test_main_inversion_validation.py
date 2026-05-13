@@ -22,17 +22,19 @@ class MainInversionValidationAcceptanceTests(unittest.TestCase):
         with self.assertRaisesRegex(UserConfigError, "必须 >= 1"):
             validate_low_resolution_shape((64, 64), 0)
 
-    def test_rotated_dem_blocks_pecube_auto_coordinates(self):
-        """产品验收：旋转 DEM 不能和 Pecube 自动真实坐标混用，避免样品坐标被错误解释。"""
-        with self.assertRaisesRegex(UserConfigError, "旋转后的 DEM 矩阵没有可靠的地理 transform"):
-            validate_rotation_spatial_constraints(
-                rotation_angle=12.5,
-                pecube_enabled=True,
-                pecube_spatial_mode="auto",
-            )
+    def test_rotated_dem_with_pecube_uses_rotated_georeferenced_mode(self):
+        """产品验收：旋转 DEM 可以接 Pecube，但必须标记为旋转后的真实空间参考。"""
+        metrics = validate_rotation_spatial_constraints(
+            rotation_angle=12.5,
+            pecube_enabled=True,
+            pecube_spatial_mode="auto",
+        )
 
-    def test_rotated_terrain_only_records_matrix_spatial_mode(self):
-        """产品验收：terrain-only 旋转优化可继续，但结果必须标记为矩阵坐标解释。"""
+        self.assertTrue(metrics["dem_rotated"])
+        self.assertEqual(metrics["spatial_reference_mode"], "rotated_georeferenced")
+
+    def test_rotated_terrain_only_records_rotated_spatial_mode(self):
+        """产品验收：terrain-only 旋转优化也必须标记为旋转后的空间参考。"""
         metrics = validate_rotation_spatial_constraints(
             rotation_angle=12.5,
             pecube_enabled=False,
@@ -40,7 +42,7 @@ class MainInversionValidationAcceptanceTests(unittest.TestCase):
         )
 
         self.assertTrue(metrics["dem_rotated"])
-        self.assertEqual(metrics["spatial_reference_mode"], "rotated_matrix")
+        self.assertEqual(metrics["spatial_reference_mode"], "rotated_georeferenced")
 
     def test_unrotated_dem_remains_georeferenced(self):
         """产品验收：未旋转 DEM 保持真实 DEM transform 坐标语义。"""
