@@ -45,7 +45,7 @@ python tools/environment/test_environment.py
 
 ## 一键运行
 
-默认 `config.ini` 已经指向 `demo/data/demo_dem.tif`，不改配置也可以直接运行：
+默认 `config.ini` 已经指向 `demo/data/demo1/demo_dem.tif`，不改配置也可以直接运行：
 
 ```bash
 python runner.py
@@ -126,7 +126,7 @@ total_loss = (
 sample_id,lon,lat,elevation,system,observed_age,sigma
 ```
 
-默认 demo 样品在 `demo/data/demo_thermo_samples.csv`，使用真实经纬度 `lon,lat`。`main` 模式会读取 DEM 的 CRS/transform，把 DEM 网格自动转换为 Pecube 的经纬度网格；样品点会自动校验是否落在 DEM/Pecube 范围内。当前支持 `AHe`、`ZHe`、`AFT`、`ZFT` 和 Pecube 输出中的常见 Ar 系列列名。若不需要热年代学约束，把 `sample_observations = none`。
+默认 demo 样品在 `demo/data/demo1/demo_thermo_samples.csv`，使用真实经纬度 `lon,lat`。`main` 模式会读取 DEM 的 CRS/transform，把 DEM 网格自动转换为 Pecube 的经纬度网格；样品点会自动校验是否落在 DEM/Pecube 范围内。当前支持 `AHe`、`ZHe`、`AFT`、`ZFT` 和 Pecube 输出中的常见 Ar 系列列名。若不需要热年代学约束，把 `sample_observations = none`。
 
 启用后会新增这些输出：
 
@@ -214,7 +214,7 @@ metrics/
 
 ## Demo 数据
 
-仓库内置 demo 文件统一放在 `demo/` 下：`demo/data/` 是输入数据，`demo/outputs/` 是默认运行输出。`demo/data/demo_dem.tif` 和 `demo/data/demo_true_uplift.npy` 用于默认 `main` demo 的轻量验证。默认配置不要求断层或研究区 Shapefile；如果没有提供这些文件，程序会自动使用 DEM 全域和均一侵蚀系数场。
+仓库内置 demo 文件统一放在 `demo/` 下：`demo/data/` 是输入数据，`demo/outputs/` 是默认运行输出。`demo/data/demo1/demo_dem.tif` 和 `demo/data/demo1/demo_true_uplift.npy` 用于默认 `main` demo 的轻量验证。默认配置不要求断层或研究区 Shapefile；如果没有提供这些文件，程序会自动使用 DEM 全域和均一侵蚀系数场。
 
 ## 常见调整
 

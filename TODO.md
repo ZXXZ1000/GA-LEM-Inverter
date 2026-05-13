@@ -102,7 +102,7 @@ dlon, dlat = longitude/latitude grid spacing, decimal degrees
 
 ### 当前临时状态
 
-- `demo/data/demo_thermo_samples.csv` 使用真实 `lon,lat`。
+- `demo/data/demo1/demo_thermo_samples.csv` 使用真实 `lon,lat`。
 - `main` 会读取 DEM CRS/transform，自动估算 Pecube 的 `lon0/lat0/dlon/dlat`。
 - 样品点会按 Pecube 输出的 `Longitude/Latitude` 匹配。
 - 这能验证 FastScape -> Pecube -> thermo loss -> GA 的完整链路。

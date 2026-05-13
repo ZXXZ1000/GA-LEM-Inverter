@@ -16,8 +16,12 @@ setup_environment.log
 demo/outputs/*
 !demo/outputs/
 !demo/outputs/.gitkeep
-demo/demo2_data/
-demo/demo2_outputs/
+!demo/outputs/demo1/
+!demo/outputs/demo1/.gitkeep
+!demo/outputs/demo2/
+demo/outputs/demo2/*
+!demo/outputs/demo2/.gitkeep
+demo/data/demo2/
 /demo_outputs/
 /synthetic_experiments/
 /sensitivity_experiments/

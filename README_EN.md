@@ -30,7 +30,7 @@ python tools/environment/test_environment.py
 
 ## Run
 
-The default `config.ini` points to the bundled demo DEM at `demo/data/demo_dem.tif`:
+The default `config.ini` points to the bundled demo DEM at `demo/data/demo1/demo_dem.tif`:
 
 ```bash
 python runner.py

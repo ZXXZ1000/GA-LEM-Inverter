@@ -42,9 +42,9 @@ from ga_lem_inverter.pipeline.erosion import create_erosion_field
 from ga_lem_inverter.workflows.main_inversion import fill_Nan
 
 
-DATA_DIR = ROOT / "demo" / "demo2_data"
+DATA_DIR = ROOT / "demo" / "data" / "demo2"
 RAW_DIR = DATA_DIR / "raw"
-OUTPUT_DIR = ROOT / "demo" / "demo2_outputs"
+OUTPUT_DIR = ROOT / "demo" / "outputs" / "demo2"
 
 QFAULT_URL = "https://earthquake.usgs.gov/static/lfs/nshm/qfaults/Qfaults_GIS.zip"
 QFAULT_ZIP = RAW_DIR / "Qfaults_GIS.zip"
