@@ -47,8 +47,8 @@ def ga_params_from_config(config, *, pop_default: int = 2, iter_default: int = 1
         "max_iter": config_int(config, "Optimization", "max_iterations", iter_default),
         "prob_cross": config_float(config, "Optimization", "cross_probability", 0.8),
         "prob_mut": config_float(config, "Optimization", "mutation_probability", 0.05),
-        "lb": config_float(config, "Optimization", "uplift_min", 3.0),
-        "ub": config_float(config, "Optimization", "uplift_max", 12.0),
+        "lb": config_float(config, "Optimization", "uplift_min", 0.1),
+        "ub": config_float(config, "Optimization", "uplift_max", 1.0),
         "uplift_precision": config_float(config, "Optimization", "uplift_precision", 0.1),
         "decay_rate": config_float(config, "Optimization", "decay_rate", 1.0),
         "min_size_pop": min_size,
@@ -65,7 +65,7 @@ def model_params_from_config(config, shape: tuple[int, int]) -> dict[str, Any]:
         "boundary_status": config.get("Model", "boundary_status", fallback="fixed_value"),
         "area_exp": config_float(config, "Model", "area_exp", 0.43),
         "slope_exp": config_float(config, "Model", "slope_exp", 1.0),
-        "time_total": config_float(config, "Model", "time_total", 1.0e4),
+        "time_total": config_float(config, "Model", "time_total", 1.0e5),
         "spacing": config_float(config, "Model", "spacing", 900.0),
         "shape": shape,
     }
@@ -81,18 +81,18 @@ def create_synthetic_uplift(shape: tuple[int, int], pattern: str = "simple", see
 
     if pattern == "simple":
         uplift = np.exp(-((X - 0.5) ** 2 + (Y - 0.5) ** 2) / 0.1)
-        uplift = 5 + 5 * uplift
+        uplift = 0.5 + 0.5 * uplift
     elif pattern == "medium":
         uplift1 = np.exp(-((X - 0.3) ** 2 + (Y - 0.3) ** 2) / 0.1)
         uplift2 = np.exp(-((X - 0.7) ** 2 + (Y - 0.7) ** 2) / 0.1)
-        uplift = 5 + 5 * (uplift1 + uplift2) / max((uplift1 + uplift2).max(), 1e-12)
+        uplift = 0.5 + 0.5 * (uplift1 + uplift2) / max((uplift1 + uplift2).max(), 1e-12)
     elif pattern == "complex":
-        main_fault = np.exp(-((0.8 * X + 0.6 * Y - 0.8) ** 2) / 0.01) * 3.5
-        conjugate_fault1 = np.exp(-((0.7 * X - 0.7 * Y - 0.2) ** 2) / 0.008) * 2.0
-        conjugate_fault2 = np.exp(-((0.6 * X - 0.8 * Y + 0.3) ** 2) / 0.008) * 2.0
-        regional_trend = 2.0 * (1 - Y)
-        local_structure = gaussian_filter(rng.random((rows, cols)), sigma=6) * 0.5
-        uplift = np.clip(4 + main_fault + conjugate_fault1 + conjugate_fault2 + regional_trend + local_structure, 5, 10)
+        main_fault = np.exp(-((0.8 * X + 0.6 * Y - 0.8) ** 2) / 0.01) * 0.35
+        conjugate_fault1 = np.exp(-((0.7 * X - 0.7 * Y - 0.2) ** 2) / 0.008) * 0.2
+        conjugate_fault2 = np.exp(-((0.6 * X - 0.8 * Y + 0.3) ** 2) / 0.008) * 0.2
+        regional_trend = 0.2 * (1 - Y)
+        local_structure = gaussian_filter(rng.random((rows, cols)), sigma=6) * 0.05
+        uplift = np.clip(0.4 + main_fault + conjugate_fault1 + conjugate_fault2 + regional_trend + local_structure, 0.5, 1.0)
     else:
         raise ValueError(f"未知 synthetic pattern: {pattern}")
 

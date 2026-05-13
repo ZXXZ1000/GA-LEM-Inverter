@@ -92,8 +92,8 @@ class SyntheticExperiment:
                 # 变异概率，控制随机扰动强度。
                 'prob_mut': 0.05,
                 # 隆升率搜索下界和上界，单位 mm/yr。
-                'lb': 3,
-                'ub': 12,
+                'lb': 0.1,
+                'ub': 1.0,
                 # 隆升率搜索步长，单位 mm/yr。GA 内部用整数编码，进入 FastScape 前自动解码。
                 'uplift_precision': 0.1,
                 # 种群衰减率。demo 不衰减；正式实验可用 0.95-0.98。
@@ -113,7 +113,7 @@ class SyntheticExperiment:
                 'boundary_status': 'fixed_value',
                 'area_exp': 0.43,
                 'slope_exp': 1,
-                'time_total': 1e4,
+                'time_total': 1e5,
                 'spacing': 900
             },
             'fitness': {
@@ -179,31 +179,31 @@ class SyntheticExperiment:
         if pattern == 'simple':
             # 简单的高斯分布
             uplift = np.exp(-((X - 0.5)**2 + (Y - 0.5)**2) / 0.1)
-            uplift = 5 + 5 * uplift  # 范围在5-10 mm/yr
+            uplift = 0.5 + 0.5 * uplift  # 范围在0.5-1.0 mm/yr
 
         elif pattern == 'medium':
             # 两个高斯分布的组合
             uplift1 = np.exp(-((X - 0.3)**2 + (Y - 0.3)**2) / 0.1)
             uplift2 = np.exp(-((X - 0.7)**2 + (Y - 0.7)**2) / 0.1)
             uplift = uplift1 + uplift2
-            uplift = 5 + 5 * uplift / uplift.max()  # 归一化到5-10 mm/yr
+            uplift = 0.5 + 0.5 * uplift / uplift.max()  # 归一化到0.5-1.0 mm/yr
 
         elif pattern == 'complex':
             # 模拟多断层系统
             # 主断层（走向斜切，更陡的梯度）
-            main_fault = np.exp(-((0.8*X + 0.6*Y - 0.8)**2) / 0.01) * 3.5  # 减小宽度，降低幅度
+            main_fault = np.exp(-((0.8*X + 0.6*Y - 0.8)**2) / 0.01) * 0.35  # 减小宽度，降低幅度
             # 共轭断层系统（更清晰的断层带）
-            conjugate_fault1 = np.exp(-((0.7*X - 0.7*Y - 0.2)**2) / 0.008) * 2.0
-            conjugate_fault2 = np.exp(-((0.6*X - 0.8*Y + 0.3)**2) / 0.008) * 2.0
+            conjugate_fault1 = np.exp(-((0.7*X - 0.7*Y - 0.2)**2) / 0.008) * 0.2
+            conjugate_fault2 = np.exp(-((0.6*X - 0.8*Y + 0.3)**2) / 0.008) * 0.2
             # 添加渐变的区域性抬升
-            regional_trend = 2.0 * (1 - Y)  # 南北向的渐变趋势
+            regional_trend = 0.2 * (1 - Y)  # 南北向的渐变趋势
             # 组合所有构造特征
-            uplift = 4 + main_fault + conjugate_fault1 + conjugate_fault2 + regional_trend
+            uplift = 0.4 + main_fault + conjugate_fault1 + conjugate_fault2 + regional_trend
             # 添加小尺度构造起伏（更细致的局部变化）
-            local_structure = gaussian_filter(np.random.rand(rows, cols), sigma=6) * 0.5
+            local_structure = gaussian_filter(np.random.rand(rows, cols), sigma=6) * 0.05
             uplift += local_structure
             # 确保uplift在合理范围内
-            uplift = np.clip(uplift, 5, 10)
+            uplift = np.clip(uplift, 0.5, 1.0)
 
         else:
             raise ValueError(f"Unknown pattern: {pattern}")

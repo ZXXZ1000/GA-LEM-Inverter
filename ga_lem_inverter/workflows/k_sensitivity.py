@@ -109,8 +109,8 @@ class KSensitivityExperiment:
                 'max_iter': 200,
                 'prob_cross': 0.7,
                 'prob_mut': 0.05,
-                'lb': 3,
-                'ub': 12,
+                'lb': 0.1,
+                'ub': 1.0,
                 'uplift_precision': 0.1,
                 'decay_rate': 0.97,
                 'min_size_pop': 20,
@@ -123,7 +123,7 @@ class KSensitivityExperiment:
                 'boundary_status': 'fixed_value',
                 'area_exp': 0.43,
                 'slope_exp': 1,
-                'time_total': 10e6,
+                'time_total': 100e6,
                 'spacing': 900
             }
         }
