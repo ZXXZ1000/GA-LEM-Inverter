@@ -22,7 +22,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 from pyproj import Transformer
 from rasterio.crs import CRS
-from rasterio.transform import Affine
+from rasterio.transform import Affine, array_bounds
+from rasterio.warp import Resampling, calculate_default_transform, reproject
 
 from ga_lem_inverter.integrations.pecube import PecubeEngine
 from ga_lem_inverter.integrations.pecube_parser import PecubeParsedOutput
@@ -90,6 +91,39 @@ class PecubeSpatialGrid:
 
 
 @dataclass(frozen=True)
+class PecubeSpatialAdapter:
+    """Map DEM arrays into the regular geographic grid Pecube expects."""
+
+    grid: PecubeSpatialGrid
+    source_crs: str
+    source_transform: tuple[float, float, float, float, float, float]
+    source_shape: tuple[int, int]
+    target_transform: tuple[float, float, float, float, float, float]
+    target_shape: tuple[int, int]
+    resample: bool
+
+    def transform_array(self, array: np.ndarray, *, resampling: Resampling = Resampling.bilinear) -> np.ndarray:
+        array = np.asarray(array, dtype=float)
+        if array.shape != self.source_shape:
+            raise ValueError(f"Pecube 输入数组 shape={array.shape} 与 DEM shape={self.source_shape} 不一致。")
+        if not self.resample:
+            return array.copy()
+        destination = np.empty(self.target_shape, dtype=float)
+        reproject(
+            source=array,
+            destination=destination,
+            src_transform=Affine(*self.source_transform),
+            src_crs=self.source_crs,
+            dst_transform=Affine(*self.target_transform),
+            dst_crs="EPSG:4326",
+            resampling=resampling,
+            src_nodata=np.nan,
+            dst_nodata=np.nan,
+        )
+        return destination
+
+
+@dataclass(frozen=True)
 class PecubeConstraintResult:
     enabled: bool
     terrain_loss: float
@@ -145,6 +179,8 @@ class PecubeFitnessEvaluator:
         self.history: list[dict[str, Any]] = []
         self.observations: list[ThermochronologyObservation] = []
         self.history_dir = self.context.root / "pecube" / "fitness_history"
+        self.spatial_adapter: PecubeSpatialAdapter | None = None
+        self.target_dem_pecube = self.target_dem
 
         if self.enabled:
             self.engine.validate()
@@ -192,6 +228,31 @@ class PecubeFitnessEvaluator:
                 lon0=self.engine.config.lon0,
                 lat0=self.engine.config.lat0,
                 dem_crs=spatial_grid.crs,
+                observation_crs=self.observation_crs,
+            )
+
+    def apply_spatial_adapter(self, spatial_adapter: PecubeSpatialAdapter) -> None:
+        """Use a DEM-to-Pecube adapter and reproject arrays when needed."""
+        self.spatial_adapter = spatial_adapter
+        self.target_dem_pecube = spatial_adapter.transform_array(self.target_dem)
+        self.engine = self.engine.with_spatial_grid(
+            lon0=spatial_adapter.grid.lon0,
+            lat0=spatial_adapter.grid.lat0,
+            dlon=spatial_adapter.grid.dlon,
+            dlat=spatial_adapter.grid.dlat,
+        )
+        if self.enabled and self.engine.config.sample_observations is not None:
+            self.observations = load_observations(
+                self.engine.config.sample_observations,
+                spatial_adapter.target_shape,
+                coordinate_system=self.observation_coordinate_system,
+                dlon=self.engine.config.dlon,
+                dlat=self.engine.config.dlat,
+                lon0=self.engine.config.lon0,
+                lat0=self.engine.config.lat0,
+                dem_crs=spatial_adapter.source_crs,
+                dem_transform=spatial_adapter.source_transform,
+                source_dem_shape=spatial_adapter.source_shape,
                 observation_crs=self.observation_crs,
             )
 
@@ -245,10 +306,12 @@ class PecubeFitnessEvaluator:
 
         eval_dir = self.context.root / "pecube" / "evaluations" / f"eval_{evaluation_id:05d}_pid_{os.getpid()}"
         try:
+            generated_dem_pecube = self._to_pecube_grid(generated_dem)
+            uplift_pecube = self._to_pecube_grid(uplift)
             result = self.engine.run(
-                topography_series=[self.target_dem, np.asarray(generated_dem, dtype=float)],
-                uplift_series=[np.asarray(uplift, dtype=float), np.asarray(uplift, dtype=float)],
-                temperature_series=[np.zeros_like(self.target_dem), np.zeros_like(self.target_dem)],
+                topography_series=[self.target_dem_pecube, generated_dem_pecube],
+                uplift_series=[uplift_pecube, uplift_pecube],
+                temperature_series=[np.zeros_like(self.target_dem_pecube), np.zeros_like(self.target_dem_pecube)],
                 sample_observations=self.engine.config.sample_observations,
                 output_dir=eval_dir,
             )
@@ -339,10 +402,14 @@ class PecubeFitnessEvaluator:
         self.context.add_artifact(age_elevation_path)
 
         age_surface_path = self.context.figure_path("pecube_age_surface_map.png")
+        generated_dem_pecube = self._to_pecube_grid(generated_dem) if generated_dem is not None else self.target_dem_pecube
+        uplift_pecube = self._to_pecube_grid(uplift) if uplift is not None else None
         plot_age_surface_map(
             self.best_result.predictions,
             age_surface_path,
-            terrain=np.asarray(generated_dem, dtype=float) if generated_dem is not None else self.target_dem,
+            terrain=generated_dem_pecube,
+            lon0=self.engine.config.lon0,
+            lat0=self.engine.config.lat0,
             dlon=self.engine.config.dlon,
             dlat=self.engine.config.dlat,
         )
@@ -356,9 +423,9 @@ class PecubeFitnessEvaluator:
         plot_pecube_dashboard(
             predictions=self.best_result.predictions,
             history=self.history,
-            target_dem=self.target_dem,
-            generated_dem=np.asarray(generated_dem, dtype=float) if generated_dem is not None else None,
-            uplift=np.asarray(uplift, dtype=float) if uplift is not None else None,
+            target_dem=self.target_dem_pecube,
+            generated_dem=generated_dem_pecube if generated_dem is not None else None,
+            uplift=uplift_pecube,
             path=dashboard_path,
         )
         self.context.add_artifact(dashboard_path)
@@ -394,6 +461,11 @@ class PecubeFitnessEvaluator:
                 lock_dir.rmdir()
             except OSError:
                 pass
+
+    def _to_pecube_grid(self, array: np.ndarray) -> np.ndarray:
+        if self.spatial_adapter is None:
+            return np.asarray(array, dtype=float)
+        return self.spatial_adapter.transform_array(np.asarray(array, dtype=float))
 
     def _record(self, result: PecubeConstraintResult, *, evaluation_id: int) -> None:
         row = {
@@ -493,6 +565,8 @@ def load_observations(
     lon0: float = 0.0,
     lat0: float = 0.0,
     dem_crs: str | None = None,
+    dem_transform: tuple[float, float, float, float, float, float] | None = None,
+    source_dem_shape: tuple[int, int] | None = None,
     observation_crs: str = "auto",
 ) -> list[ThermochronologyObservation]:
     if not Path(path).exists():
@@ -520,6 +594,8 @@ def load_observations(
                     lon0=lon0,
                     lat0=lat0,
                     dem_crs=dem_crs,
+                    dem_transform=dem_transform,
+                    source_dem_shape=source_dem_shape,
                     observation_crs=observation_crs,
                 )
             )
@@ -539,6 +615,8 @@ def _parse_observation(
     lon0: float,
     lat0: float,
     dem_crs: str | None,
+    dem_transform: tuple[float, float, float, float, float, float] | None,
+    source_dem_shape: tuple[int, int] | None,
     observation_crs: str,
 ) -> ThermochronologyObservation:
     sample_id = row["sample_id"].strip()
@@ -582,10 +660,36 @@ def _parse_observation(
                 f"允许范围 x=[{min_x},{max_x}], y=[{min_y},{max_y}]。"
             )
     elif coordinate_system in {"grid", "grid_index", "index"}:
-        if not (0 <= x <= cols - 1 and 0 <= y <= rows - 1):
-            raise ValueError(f"观测样品 CSV 第 {line_number} 行网格坐标越界: x={x}, y={y}, DEM shape={dem_shape}")
-        x = float(lon0) + x * float(dlon)
-        y = float(lat0) + y * float(dlat)
+        if dem_transform is not None and dem_crs:
+            source_rows, source_cols = source_dem_shape or dem_shape
+            if not (0 <= x <= source_cols - 1 and 0 <= y <= source_rows - 1):
+                raise ValueError(
+                    f"观测样品 CSV 第 {line_number} 行 DEM 网格坐标越界: "
+                    f"x={x}, y={y}, source DEM shape={(source_rows, source_cols)}"
+                )
+            dem_x, dem_y = Affine(*dem_transform) * (x + 0.5, y + 0.5)
+            x, y = _coordinates_to_pecube(
+                float(dem_x),
+                float(dem_y),
+                coordinate_system="dem_crs",
+                source_columns=source_columns,
+                dem_crs=dem_crs,
+                observation_crs=observation_crs,
+            )
+            min_x = float(lon0)
+            min_y = float(lat0)
+            max_x = float(lon0) + (cols - 1) * float(dlon)
+            max_y = float(lat0) + (rows - 1) * float(dlat)
+            if not (_between(x, min_x, max_x) and _between(y, min_y, max_y)):
+                raise ValueError(
+                    f"观测样品 CSV 第 {line_number} 行 DEM 网格坐标转换后越界: "
+                    f"x={x}, y={y}，允许范围 x=[{min_x},{max_x}], y=[{min_y},{max_y}]。"
+                )
+        else:
+            if not (0 <= x <= cols - 1 and 0 <= y <= rows - 1):
+                raise ValueError(f"观测样品 CSV 第 {line_number} 行网格坐标越界: x={x}, y={y}, DEM shape={dem_shape}")
+            x = float(lon0) + x * float(dlon)
+            y = float(lat0) + y * float(dlat)
     else:
         raise ValueError(
             "不支持的 [Pecube] observation_coordinate_system="
@@ -632,8 +736,8 @@ def _between(value: float, left: float, right: float) -> bool:
     return low - tolerance <= value <= high + tolerance
 
 
-def pecube_grid_from_dem_profile(profile: dict[str, Any], shape: tuple[int, int]) -> PecubeSpatialGrid | None:
-    """Derive a Pecube lon/lat grid from a GeoTIFF-style DEM profile."""
+def pecube_spatial_adapter_from_dem_profile(profile: dict[str, Any], shape: tuple[int, int]) -> PecubeSpatialAdapter | None:
+    """Derive a true regular geographic Pecube grid from a DEM profile."""
     transform = profile.get("transform")
     crs = profile.get("crs")
     if transform is None or crs is None:
@@ -643,31 +747,65 @@ def pecube_grid_from_dem_profile(profile: dict[str, Any], shape: tuple[int, int]
     if rows < 2 or cols < 2:
         raise ValueError("DEM 网格太小，无法推导 Pecube 经纬度步长。")
 
-    left_x, top_y = affine * (0.5, 0.5)
-    right_x, bottom_y = affine * (cols - 0.5, rows - 0.5)
-    bottom_left_x, bottom_left_y = affine * (0.5, rows - 0.5)
-    bottom_right_x, bottom_right_y = affine * (cols - 0.5, rows - 0.5)
-    top_left_x, top_left_y = affine * (0.5, 0.5)
     crs_obj = CRS.from_user_input(crs)
     if crs_obj.to_epsg() == 4326:
-        lon_bottom_left, lat_bottom_left = bottom_left_x, bottom_left_y
-        lon_bottom_right, _ = bottom_right_x, bottom_right_y
-        _, lat_top_left = top_left_x, top_left_y
+        target_transform = affine
+        target_shape = (rows, cols)
+        resample = False
     else:
-        transformer = Transformer.from_crs(crs_obj, "EPSG:4326", always_xy=True)
-        lon_bottom_left, lat_bottom_left = transformer.transform(bottom_left_x, bottom_left_y)
-        lon_bottom_right, _ = transformer.transform(bottom_right_x, bottom_right_y)
-        _, lat_top_left = transformer.transform(top_left_x, top_left_y)
+        left, bottom, right, top = array_bounds(rows, cols, affine)
+        target_transform, width, height = calculate_default_transform(
+            crs_obj,
+            "EPSG:4326",
+            cols,
+            rows,
+            left,
+            bottom,
+            right,
+            top,
+        )
+        target_shape = (height, width)
+        resample = True
 
-    dlon = (lon_bottom_right - lon_bottom_left) / (cols - 1)
-    dlat = (lat_top_left - lat_bottom_left) / (rows - 1)
+    grid = _grid_from_geographic_transform(
+        target_transform,
+        target_shape,
+        source="dem_profile_reprojected" if resample else "dem_profile",
+    )
+    return PecubeSpatialAdapter(
+        grid=grid,
+        source_crs=crs_obj.to_string(),
+        source_transform=tuple(float(value) for value in tuple(affine)[:6]),
+        source_shape=(rows, cols),
+        target_transform=tuple(float(value) for value in tuple(target_transform)[:6]),
+        target_shape=target_shape,
+        resample=resample,
+    )
+
+
+def pecube_grid_from_dem_profile(profile: dict[str, Any], shape: tuple[int, int]) -> PecubeSpatialGrid | None:
+    """Derive the Pecube lon/lat grid from a DEM profile."""
+    adapter = pecube_spatial_adapter_from_dem_profile(profile, shape)
+    return adapter.grid if adapter is not None else None
+
+
+def _grid_from_geographic_transform(transform: Affine, shape: tuple[int, int], *, source: str) -> PecubeSpatialGrid:
+    rows, cols = shape
+    if rows < 2 or cols < 2:
+        raise ValueError("Pecube 经纬度网格太小，无法推导步长。")
+    left_center, top_center = transform * (0.5, 0.5)
+    right_center, _ = transform * (cols - 0.5, 0.5)
+    bottom_left_center, bottom_lat = transform * (0.5, rows - 0.5)
+
+    dlon = (right_center - left_center) / (cols - 1)
+    dlat = (top_center - bottom_lat) / (rows - 1)
     return PecubeSpatialGrid(
-        lon0=float(lon_bottom_left),
-        lat0=float(lat_bottom_left),
+        lon0=float(bottom_left_center),
+        lat0=float(bottom_lat),
         dlon=float(dlon),
         dlat=float(dlat),
-        crs=crs_obj.to_string(),
-        source="dem_profile",
+        crs="EPSG:4326",
+        source=source,
     )
 
 
@@ -972,13 +1110,15 @@ def plot_age_surface_map(
     path: Path,
     *,
     terrain: np.ndarray | None = None,
+    lon0: float = 0.0,
+    lat0: float = 0.0,
     dlon: float = 1.0,
     dlat: float = 1.0,
 ) -> None:
     fig, ax = plt.subplots(figsize=(7.0, 5.8), constrained_layout=True)
     if terrain is not None:
         terrain_arr = np.asarray(terrain, dtype=float)
-        extent = _terrain_extent(terrain_arr, dlon=dlon, dlat=dlat)
+        extent = _terrain_extent(terrain_arr, lon0=lon0, lat0=lat0, dlon=dlon, dlat=dlat)
         im = ax.imshow(terrain_arr, cmap="terrain", origin="lower", extent=extent, alpha=0.88)
         fig.colorbar(im, ax=ax, label="Elevation", fraction=0.045, pad=0.03)
     sc = ax.scatter(
@@ -1008,8 +1148,9 @@ def plot_age_surface_map(
     ys = [p.y for p in predictions]
     if terrain is not None:
         terrain_arr = np.asarray(terrain, dtype=float)
-        ax.set_xlim(0.0, float(terrain_arr.shape[1] - 1) * float(dlon))
-        ax.set_ylim(0.0, float(terrain_arr.shape[0] - 1) * float(dlat))
+        extent = _terrain_extent(terrain_arr, lon0=lon0, lat0=lat0, dlon=dlon, dlat=dlat)
+        ax.set_xlim(extent[0], extent[1])
+        ax.set_ylim(extent[2], extent[3])
     else:
         x_pad = max((max(xs) - min(xs)) * 0.10, float(dlon) * 2)
         y_pad = max((max(ys) - min(ys)) * 0.10, float(dlat) * 2)
@@ -1100,10 +1241,17 @@ def _system_marker(system: str) -> str:
     return "o"
 
 
-def _terrain_extent(terrain: np.ndarray, *, dlon: float, dlat: float) -> tuple[float, float, float, float]:
-    max_x = float(terrain.shape[1] - 1) * float(dlon)
-    max_y = float(terrain.shape[0] - 1) * float(dlat)
-    return (0.0, max_x, 0.0, max_y)
+def _terrain_extent(
+    terrain: np.ndarray,
+    *,
+    lon0: float = 0.0,
+    lat0: float = 0.0,
+    dlon: float,
+    dlat: float,
+) -> tuple[float, float, float, float]:
+    max_x = float(lon0) + float(terrain.shape[1] - 1) * float(dlon)
+    max_y = float(lat0) + float(terrain.shape[0] - 1) * float(dlat)
+    return (float(lon0), max_x, float(lat0), max_y)
 
 
 def _numeric_history_rows(history: list[dict[str, Any]]) -> list[dict[str, float]]:

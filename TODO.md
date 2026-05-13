@@ -83,6 +83,8 @@
 
 ## Pecube 坐标一致性修正
 
+状态：已完成。
+
 ### 问题
 
 当前 `main` 模式已经可以从 DEM 的 CRS/transform 自动推导 `lon0/lat0/dlon/dlat`，并把样品 `lon/lat` 接到 Pecube 输出上。
@@ -137,3 +139,13 @@ dlon, dlat = longitude/latitude grid spacing, decimal degrees
    - 样品点必须落在 Pecube 经纬度网格范围内。
    - Pecube 输出 `Ages001.csv` 的 `Longitude/Latitude` 范围必须覆盖样品。
    - 输出 summary 里记录坐标处理方式和网格范围。
+
+### 已实现
+
+- 新增 `PecubeSpatialAdapter`，把 DEM CRS/transform 转成 Pecube 所需的规则 EPSG:4326 网格。
+- EPSG:4326 DEM 直接使用原始规则经纬度网格，不额外重采样。
+- 投影 DEM 使用 `rasterio.warp.calculate_default_transform` 和 `rasterio.warp.reproject` 把 `topography/uplift/temperature` 数组重采样到规则经纬度网格。
+- `main` 模式自动使用该 adapter，Pecube 运行时写入的 `topo/uplift/temp` 与 `lon0/lat0/dlon/dlat` 保持同一网格。
+- 样品 `dem_crs/projected` 坐标自动转 EPSG:4326；`grid_index` 在自动模式下解释为原始 DEM 像素索引，再转 EPSG:4326。
+- Pecube 空间图使用真实 `lon0/lat0` 作为 extent，避免样品点和地形底图错位。
+- 已增加坐标单元测试，覆盖 EPSG:4326 DEM、投影 DEM 重采样、投影样品坐标、DEM 像素索引样品。

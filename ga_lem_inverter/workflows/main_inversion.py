@@ -26,7 +26,7 @@ logging.getLogger('tensorflow').setLevel(logging.ERROR)
 logging.getLogger('matplotlib').setLevel(logging.ERROR)
 np.seterr(all='ignore')
 from ga_lem_inverter.config import UserConfigError
-from ga_lem_inverter.integrations.pecube_fitness import PecubeFitnessEvaluator, pecube_grid_from_dem_profile
+from ga_lem_inverter.integrations.pecube_fitness import PecubeFitnessEvaluator, pecube_spatial_adapter_from_dem_profile
 from ga_lem_inverter.outputs import RunContext, write_metrics
 from ga_lem_inverter.pipeline.data import read_shapefile, load_dem_data, calculate_shp_rotation_angle, rotate_data, reproject_files_to_geographic
 from ga_lem_inverter.pipeline.preprocessing import interpolate_uplift_cv, unify_array_sizes
@@ -635,13 +635,15 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
                         "当前 Pecube 自动坐标转换不支持旋转后的 DEM。"
                         "请将 study_area_shp_path 设为 none，或先把 DEM 预处理成目标方向后再输入。"
                     )
-                spatial_grid = pecube_grid_from_dem_profile(dem_profile, resampled_dem.shape)
-                if spatial_grid is not None:
-                    pecube_evaluator.apply_spatial_grid(spatial_grid)
+                spatial_adapter = pecube_spatial_adapter_from_dem_profile(dem_profile, resampled_dem.shape)
+                if spatial_adapter is not None:
+                    pecube_evaluator.apply_spatial_adapter(spatial_adapter)
+                    spatial_grid = spatial_adapter.grid
                     logging.info(
                         "Pecube 空间网格已由 DEM 自动推导: "
                         f"lon0={spatial_grid.lon0}, lat0={spatial_grid.lat0}, "
-                        f"dlon={spatial_grid.dlon}, dlat={spatial_grid.dlat}, crs={spatial_grid.crs}"
+                        f"dlon={spatial_grid.dlon}, dlat={spatial_grid.dlat}, crs={spatial_grid.crs}, "
+                        f"shape={spatial_adapter.target_shape}, resample={spatial_adapter.resample}"
                     )
                 else:
                     logging.warning("DEM 缺少 CRS/transform，Pecube 使用 config.ini 中的 lon0/lat0/dlon/dlat。")

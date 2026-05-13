@@ -119,7 +119,15 @@ def run_pecube_coupled_workflow(config: configparser.ConfigParser, context: RunC
         plot_age_elevation(predictions, age_elevation_path)
         context.add_artifact(age_elevation_path)
         age_surface_path = context.figure_path("pecube_age_surface_map.png")
-        plot_age_surface_map(predictions, age_surface_path, terrain=topographies[-1], dlon=engine.config.dlon, dlat=engine.config.dlat)
+        plot_age_surface_map(
+            predictions,
+            age_surface_path,
+            terrain=topographies[-1],
+            lon0=engine.config.lon0,
+            lat0=engine.config.lat0,
+            dlon=engine.config.dlon,
+            dlat=engine.config.dlat,
+        )
         context.add_artifact(age_surface_path)
         loss_history = [{
             "evaluation": 1,
