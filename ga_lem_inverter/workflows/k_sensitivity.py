@@ -184,7 +184,7 @@ class KSensitivityExperiment:
 
             except Exception as e:
                 logging.error(f"Error in objective function: {e}")
-                return 1.0
+                return np.inf
 
         return objective_function
 

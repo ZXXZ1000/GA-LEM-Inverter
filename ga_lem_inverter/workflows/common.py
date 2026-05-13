@@ -129,7 +129,7 @@ def build_objective(target_dem: np.ndarray, low_res_shape: tuple[int, int], mode
             return 1 - similarity
         except Exception as exc:
             logging.error("目标函数计算失败: %s", exc)
-            return 1.0
+            return np.inf
 
     return objective_function
 

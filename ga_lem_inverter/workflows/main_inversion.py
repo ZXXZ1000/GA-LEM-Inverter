@@ -173,7 +173,7 @@ def create_objective_function(resampled_dem, LOW_RES_SHAPE, ORIGINAL_SHAPE,
 
         except Exception as e:
             logging.error(f"目标函数计算失败: {e}")
-            return 1.0  # 失败时返回最大不相似度
+            return np.inf  # 失败时交给 GA 失败率控制处理
 
     return objective_function
 

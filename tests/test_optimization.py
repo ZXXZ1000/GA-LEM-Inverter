@@ -184,6 +184,80 @@ class MyGATests(unittest.TestCase):
         self.assertTrue(np.all(ga.Chrom >= 1))
         self.assertTrue(np.all(ga.Chrom <= 10))
 
+    def test_ga_aborts_when_objective_systematically_returns_invalid_values(self):
+        """整代 objective 系统性失败时，不应继续假装优化成功。"""
+        ga = MyGA(
+            func=lambda x: np.nan,
+            n_dim=4,
+            size_pop=5,
+            max_iter=1,
+            prob_mut=0,
+            lb=0,
+            ub=10,
+            n_jobs=1,
+        )
+        ga.Chrom = np.ones((5, 4), dtype=int)
+        ga.low_res_shape = (2, 2)
+
+        with self.assertRaisesRegex(RuntimeError, "failed for 5/5 candidates"):
+            ga.run(max_iter=1, patience=10)
+
+    def test_ga_aborts_when_objective_systematically_raises(self):
+        """objective 直接抛异常时，也要计入失败率并中止。"""
+        def objective(_x):
+            raise ValueError("boom")
+
+        ga = MyGA(
+            func=objective,
+            n_dim=4,
+            size_pop=5,
+            max_iter=1,
+            prob_mut=0,
+            lb=0,
+            ub=10,
+            n_jobs=1,
+        )
+        ga.Chrom = np.ones((5, 4), dtype=int)
+        ga.low_res_shape = (2, 2)
+
+        with self.assertRaisesRegex(RuntimeError, "failed for 5/5 candidates"):
+            ga.run(max_iter=1, patience=10)
+
+    def test_ga_penalizes_sparse_invalid_fitness_values(self):
+        """少量非法 fitness 会被惩罚为 1.0，但不触发系统性失败。"""
+        calls = {"count": 0}
+
+        def objective(x):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                return np.nan
+            return 0.2
+
+        ga = MyGA(
+            func=objective,
+            n_dim=4,
+            size_pop=5,
+            max_iter=1,
+            prob_mut=0,
+            lb=0,
+            ub=10,
+            n_jobs=1,
+        )
+        ga.Chrom = np.ones((5, 4), dtype=int)
+        ga.low_res_shape = (2, 2)
+        ga.selection = lambda: None
+        ga.crossover = lambda: None
+        ga.mutation = lambda: None
+        ga.reduce_population_size = lambda: None
+
+        best_x, best_y, history = ga.run(max_iter=1, patience=10)
+
+        self.assertIsNotNone(best_x)
+        self.assertEqual(best_y, 0.2)
+        self.assertEqual(history, [0.2])
+        self.assertTrue(np.all(np.isfinite(ga.Y)))
+        self.assertIn(1.0, ga.Y)
+
 
 if __name__ == "__main__":
     unittest.main()

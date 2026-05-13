@@ -9,14 +9,31 @@ from tqdm import tqdm
 import time
 from joblib import Parallel, delayed
 
+def _evaluate_fitness(obj_func, x):
+    try:
+        return obj_func(x)
+    except Exception as exc:
+        logging.error("目标函数评价失败，使用 inf 作为失败标记: %s", exc)
+        return np.inf
+
+
 def parallel_fitness(obj_func, X, n_jobs=-1):
     """并行计算适应度函数"""
     try:
-        fitness_values = Parallel(n_jobs=n_jobs)(delayed(obj_func)(x) for x in X)
+        fitness_values = Parallel(n_jobs=n_jobs)(delayed(_evaluate_fitness)(obj_func, x) for x in X)
         return np.array(fitness_values)
     except Exception as e:
         logging.error(f"并行计算失败,切换为串行: {e}")
-        return np.array([obj_func(x) for x in X])
+        return np.array([_evaluate_fitness(obj_func, x) for x in X])
+
+
+def _sanitize_fitness_values(values, penalty=1.0):
+    """把目标函数返回值限制为有限的 0-1 loss，并返回失败掩码。"""
+    raw_values = np.asarray(values, dtype=float)
+    failure_mask = ~np.isfinite(raw_values) | (raw_values < 0.0) | (raw_values > 1.0)
+    sanitized = np.clip(np.nan_to_num(raw_values, nan=penalty, posinf=penalty, neginf=penalty), 0.0, 1.0)
+    sanitized[failure_mask] = penalty
+    return sanitized, failure_mask
 
 
 def _get_uplift_precision(ga_params):
@@ -140,6 +157,8 @@ class MyGA:
         self.min_size_pop = min_size_pop
         self.patience = patience
         self.n_jobs = n_jobs
+        self.failure_threshold = 0.8
+        self.max_consecutive_full_failures = 2
 
         # 初始化种群和适应度
         self.Chrom = None
@@ -586,6 +605,7 @@ class MyGA:
         patience_value = patience if patience is not None else self.patience
         best = None
         no_improve_count = 0
+        consecutive_full_failures = 0
         fitness_history = []
 
         # 多样性注入参数
@@ -602,7 +622,27 @@ class MyGA:
 
                 # 评估当前种群
                 self.X = self.Chrom.copy()
-                self.Y = parallel_fitness(self.func, self.X, n_jobs=self.n_jobs)
+                raw_y = parallel_fitness(self.func, self.X, n_jobs=self.n_jobs)
+                self.Y, failure_mask = _sanitize_fitness_values(raw_y)
+                failure_count = int(np.count_nonzero(failure_mask))
+                failure_rate = failure_count / max(1, len(self.Y))
+                if failure_count:
+                    logging.warning(
+                        "Generation %s: %s/%s fitness values invalid and replaced with penalty %.3f",
+                        gen,
+                        failure_count,
+                        len(self.Y),
+                        1.0,
+                    )
+                if failure_rate >= 1.0:
+                    consecutive_full_failures += 1
+                else:
+                    consecutive_full_failures = 0
+                if failure_rate >= self.failure_threshold or consecutive_full_failures >= self.max_consecutive_full_failures:
+                    raise RuntimeError(
+                        f"GA objective failed for {failure_count}/{len(self.Y)} candidates "
+                        f"(failure_rate={failure_rate:.0%}). 请检查 FastScape/LPIPS/Pecube 或输入数据。"
+                    )
 
                 # 排序后立即记录本代最优个体。此时 self.Chrom 和 self.Y 是对应关系；
                 # 后续 selection/crossover/mutation 会改写种群，必须先 copy 固定下来。
@@ -642,6 +682,7 @@ class MyGA:
         except Exception as e:
             logging.error(f"Error in GA run: {e}")
             logging.exception("Exception details:")
+            raise
 
         self.best_x, self.best_y = best if best is not None else (None, float('inf'))
         return self.best_x, self.best_y, fitness_history
@@ -744,4 +785,4 @@ def optimize_uplift_ga(obj_func, resampled_dem, LOW_RES_SHAPE, ORIGINAL_SHAPE,
     except Exception as e:
         logging.error(f"Error in optimize_uplift_ga: {e}")
         logging.exception("Exception details:")
-        return None, float('inf'), None
+        raise
