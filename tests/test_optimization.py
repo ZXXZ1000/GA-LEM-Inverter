@@ -87,6 +87,37 @@ class MyGATests(unittest.TestCase):
         self.assertFalse(np.all(np.equal(best_x, best_x.astype(int))))
         self.assertAlmostEqual(best_y, history[-1])
 
+    def test_spatial_crossover_handles_small_low_resolution_shapes(self):
+        """低分辨率矩阵很小时，block_size 不能变成 0。"""
+        shapes = [(1, 8), (2, 2), (8, 8)]
+
+        for shape in shapes:
+            with self.subTest(shape=shape):
+                n_dim = shape[0] * shape[1]
+                ga = MyGA(
+                    func=lambda x: 0.0,
+                    n_dim=n_dim,
+                    size_pop=4,
+                    max_iter=5,
+                    prob_mut=0,
+                    lb=0,
+                    ub=100,
+                    n_jobs=1,
+                )
+                ga.low_res_shape = shape
+                parent1 = np.arange(n_dim, dtype=int).reshape(shape)
+                parent2 = np.arange(n_dim, 2 * n_dim, dtype=int).reshape(shape)
+
+                np.random.seed(123)
+                for _ in range(20):
+                    child1, child2 = ga.spatial_crossover(parent1, parent2)
+                    self.assertEqual(child1.shape, shape)
+                    self.assertEqual(child2.shape, shape)
+                    self.assertTrue(np.all(child1 >= 0))
+                    self.assertTrue(np.all(child1 <= 100))
+                    self.assertTrue(np.all(child2 >= 0))
+                    self.assertTrue(np.all(child2 <= 100))
+
 
 if __name__ == "__main__":
     unittest.main()

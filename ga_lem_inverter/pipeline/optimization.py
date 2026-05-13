@@ -184,10 +184,16 @@ class MyGA:
         - child1, child2: 子代个体
         """
         rows, cols = parent1.shape
+        if rows < 1 or cols < 1:
+            raise ValueError(f"Invalid crossover matrix shape: {parent1.shape}")
 
         # 动态调整块大小
         block_size = self.get_adaptive_block_size()
-        block_size = min(block_size, min(rows // 3, cols // 3))  # 确保块大小不超过矩阵尺寸的1/3
+        # 小矩阵例如 1xN、2x2 时 rows//3 或 cols//3 会变成 0。
+        # 这时退化成 1x1 空间块交换，仍保留局部交叉含义。
+        max_block_size = max(1, min(rows, cols))
+        third_size = max(1, min(rows // 3, cols // 3))
+        block_size = max(1, min(block_size, max_block_size, third_size))
 
         total_blocks = (rows * cols) // (block_size * block_size)
         max_row = rows - block_size
@@ -224,9 +230,9 @@ class MyGA:
             for _ in range(n_blocks):
                 # 尝试找到未交换的位置
                 for attempt in range(10):  # 最多尝试10次
-                    if max_row > 0 and max_col > 0:
-                        start_row = np.random.randint(0, max_row)
-                        start_col = np.random.randint(0, max_col)
+                    if max_row >= 0 and max_col >= 0:
+                        start_row = np.random.randint(0, max_row + 1)
+                        start_col = np.random.randint(0, max_col + 1)
 
                         pos = (start_row, start_col)
                         if pos not in exchanged_positions:
