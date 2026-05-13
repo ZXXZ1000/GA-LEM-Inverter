@@ -83,6 +83,7 @@ mode = main
 - `[Data] study_area_shp_path`：研究区 Shapefile，可填 `none` 跳过。
 - `[Optimization] scale_factor`：隆升场降维因子，也就是 K。
 - `[Optimization] population_size`、`max_iterations`：GA 搜索规模。
+- `[Optimization] uplift_min` / `uplift_max` / `uplift_precision`：隆升率搜索范围和步长，单位 `mm/yr`。程序内部用整数编码搜索，例如 `0..8 mm/yr` 配合 `0.1` 步长会变成 `0..80`，进入 FastScape 和输出图件前自动还原为真实隆升率。
 - `[Optimization] n_jobs`：并行任务数；`-1` 使用全部 CPU 核心。Pecube 约束启用时，每个候选解会写入独立 `pecube/evaluations/eval_*` 目录，可以和 FastScape 一起并行。
 - `[Pecube] enabled`：默认 `auto`；配置了 `sample_observations` 时，`main` 模式会把 Pecube 热年代学 loss 接进 GA fitness。
 - `[Pecube] sample_observations`：热年代学样品 CSV；设为 `none` 即关闭 Pecube 约束。

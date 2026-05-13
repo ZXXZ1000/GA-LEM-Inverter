@@ -94,6 +94,8 @@ class SyntheticExperiment:
                 # 隆升率搜索下界和上界，单位 mm/yr。
                 'lb': 3,
                 'ub': 12,
+                # 隆升率搜索步长，单位 mm/yr。GA 内部用整数编码，进入 FastScape 前自动解码。
+                'uplift_precision': 0.1,
                 # 种群衰减率。demo 不衰减；正式实验可用 0.95-0.98。
                 'decay_rate': 1.0,
                 # 最小种群数，不能大于 pop。

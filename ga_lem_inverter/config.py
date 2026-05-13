@@ -46,6 +46,7 @@ def _copy_legacy_sections(config: configparser.ConfigParser) -> None:
         key_aliases = {
             "uplift_min": "lb",
             "uplift_max": "ub",
+            "uplift_precision": "precision",
             "population_size": "ga_pop_size",
             "max_iterations": "ga_max_iter",
             "cross_probability": "ga_prob_cross",

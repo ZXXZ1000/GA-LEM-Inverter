@@ -603,6 +603,7 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
             'prob_mut': _config_float(config, 'Optimization', 'mutation_probability', fallback=0.05, aliases=(('GeneticAlgorithm', 'ga_prob_mut'),)),
             'lb': _config_float(config, 'Optimization', 'uplift_min', fallback=0.0, aliases=(('GeneticAlgorithm', 'lb'),)),
             'ub': _config_float(config, 'Optimization', 'uplift_max', fallback=8.0, aliases=(('GeneticAlgorithm', 'ub'),)),
+            'uplift_precision': _config_float(config, 'Optimization', 'uplift_precision', fallback=0.1, aliases=(('GeneticAlgorithm', 'precision'),)),
             'decay_rate': _config_float(config, 'Optimization', 'decay_rate', fallback=1.0, aliases=(('GeneticAlgorithm', 'decay_rate'),)),
             'min_size_pop': _config_int(config, 'Optimization', 'min_population_size', fallback=4, aliases=(('GeneticAlgorithm', 'min_size_pop'),)),
             'patience': _config_int(config, 'Optimization', 'patience', fallback=3, aliases=(('GeneticAlgorithm', 'patience'),)),

@@ -49,6 +49,7 @@ def ga_params_from_config(config, *, pop_default: int = 2, iter_default: int = 1
         "prob_mut": config_float(config, "Optimization", "mutation_probability", 0.05),
         "lb": config_float(config, "Optimization", "uplift_min", 3.0),
         "ub": config_float(config, "Optimization", "uplift_max", 12.0),
+        "uplift_precision": config_float(config, "Optimization", "uplift_precision", 0.1),
         "decay_rate": config_float(config, "Optimization", "decay_rate", 1.0),
         "min_size_pop": min_size,
         "patience": config_int(config, "Optimization", "patience", 1),

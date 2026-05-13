@@ -111,6 +111,7 @@ class KSensitivityExperiment:
                 'prob_mut': 0.05,
                 'lb': 3,
                 'ub': 12,
+                'uplift_precision': 0.1,
                 'decay_rate': 0.97,
                 'min_size_pop': 20,
                 'patience': 60

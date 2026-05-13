@@ -18,6 +18,24 @@ def parallel_fitness(obj_func, X, n_jobs=-1):
         logging.error(f"并行计算失败,切换为串行: {e}")
         return np.array([obj_func(x) for x in X])
 
+
+def _get_uplift_precision(ga_params):
+    """读取隆升率搜索步长，单位 mm/yr。"""
+    precision = float(ga_params.get('uplift_precision', ga_params.get('precision', 1.0)))
+    if precision <= 0:
+        raise ValueError(f"uplift_precision 必须大于 0，当前为 {precision}")
+    return precision
+
+
+def _encode_uplift_value(value, precision):
+    """把真实隆升率 mm/yr 转成 GA 内部整数编码。"""
+    return int(round(float(value) / precision))
+
+
+def _decode_uplift_vector(encoded_vector, precision):
+    """把 GA 内部整数编码解码成真实隆升率 mm/yr。"""
+    return np.asarray(encoded_vector, dtype=float) * precision
+
 class MyGA:
     """自定义遗传算法类，专门用于隆升率场优化"""
     def __init__(self, func, n_dim, size_pop=50, max_iter=200, prob_mut=0.01,
@@ -610,28 +628,46 @@ def optimize_uplift_ga(obj_func, resampled_dem, LOW_RES_SHAPE, ORIGINAL_SHAPE,
 
         # 设置遗传算法维度
         n_dim = LOW_RES_SHAPE[0] * LOW_RES_SHAPE[1]
-        lb_array = np.full(n_dim, ga_params['lb'])
-        ub_array = np.full(n_dim, ga_params['ub'])
+        uplift_precision = _get_uplift_precision(ga_params)
+        encoded_lb = _encode_uplift_value(ga_params['lb'], uplift_precision)
+        encoded_ub = _encode_uplift_value(ga_params['ub'], uplift_precision)
+        if encoded_lb > encoded_ub:
+            raise ValueError(f"uplift_min 不能大于 uplift_max: {ga_params['lb']} > {ga_params['ub']}")
+        lb_array = np.full(n_dim, encoded_lb)
+        ub_array = np.full(n_dim, encoded_ub)
+
+        def decoded_obj_func(encoded_vector):
+            return obj_func(_decode_uplift_vector(encoded_vector, uplift_precision))
+
+        logging.info(
+            "Uplift encoding: real range %.6g..%.6g mm/yr, precision %.6g mm/yr, "
+            "integer range %s..%s",
+            ga_params['lb'],
+            ga_params['ub'],
+            uplift_precision,
+            encoded_lb,
+            encoded_ub,
+        )
 
         # scikit-opt 的 set_run_mode 只是可选优化；部分环境导入 sko.tools
         # 会重复设置 multiprocessing start method，失败时不应中断自定义 GA。
         if run_mode:
             try:
                 from sko.tools import set_run_mode
-                set_run_mode(obj_func, run_mode)
+                set_run_mode(decoded_obj_func, run_mode)
             except Exception as e:
                 logging.warning(f"Skipping scikit-opt run mode '{run_mode}': {e}")
 
         # 创建遗传算法实例
         ga = MyGA(
-            func=obj_func,
+            func=decoded_obj_func,
             n_dim=n_dim,
             size_pop=ga_params['pop'],
             max_iter=ga_params['max_iter'],
             prob_mut=ga_params['prob_mut'],
             lb=lb_array,
             ub=ub_array,
-            precision=1,
+            precision=uplift_precision,
             decay_rate=ga_params.get('decay_rate', 0.95),
             min_size_pop=ga_params.get('min_size_pop', 10),
             patience=ga_params.get('patience', 40),
@@ -641,8 +677,8 @@ def optimize_uplift_ga(obj_func, resampled_dem, LOW_RES_SHAPE, ORIGINAL_SHAPE,
         # 基于地形初始化种群
         ga.init_population_based_on_terrain(
             matrix=resampled_dem,
-            lb=ga_params['lb'],
-            ub=ga_params['ub'],
+            lb=encoded_lb,
+            ub=encoded_ub,
             low_res_shape=LOW_RES_SHAPE,
             noise_level=3,
             random_fraction=0.2
@@ -658,7 +694,8 @@ def optimize_uplift_ga(obj_func, resampled_dem, LOW_RES_SHAPE, ORIGINAL_SHAPE,
             resampled_dem=resampled_dem
         )
 
-        return best_x, best_y, fitness_history
+        decoded_best_x = None if best_x is None else _decode_uplift_vector(best_x, uplift_precision)
+        return decoded_best_x, best_y, fitness_history
 
     except Exception as e:
         logging.error(f"Error in optimize_uplift_ga: {e}")

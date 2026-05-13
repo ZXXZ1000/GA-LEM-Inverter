@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 
-from ga_lem_inverter.pipeline.optimization import MyGA
+from ga_lem_inverter.pipeline.optimization import MyGA, optimize_uplift_ga
 
 
 class MyGATests(unittest.TestCase):
@@ -47,6 +47,45 @@ class MyGATests(unittest.TestCase):
 
         ga.Chrom[0, 0] = 99
         self.assertEqual(best_x[0], 2)
+
+    def test_optimize_uplift_ga_decodes_integer_chromosomes_to_real_uplift(self):
+        """GA 内部用整数编码搜索，但 objective 和返回值必须使用真实 mm/yr。"""
+        seen_values = []
+
+        def objective(uplift_vector):
+            uplift_vector = np.asarray(uplift_vector, dtype=float)
+            seen_values.append(uplift_vector.copy())
+            return float(np.sum((uplift_vector - 0.2) ** 2))
+
+        best_x, best_y, history = optimize_uplift_ga(
+            obj_func=objective,
+            resampled_dem=np.arange(9, dtype=float).reshape(3, 3),
+            LOW_RES_SHAPE=(3, 3),
+            ORIGINAL_SHAPE=(3, 3),
+            ga_params={
+                "pop": 6,
+                "max_iter": 1,
+                "prob_cross": 0.0,
+                "prob_mut": 0.0,
+                "lb": 0.0,
+                "ub": 0.3,
+                "uplift_precision": 0.1,
+                "decay_rate": 1.0,
+                "min_size_pop": 6,
+                "patience": 10,
+                "random_seed": 7,
+            },
+            model_params={},
+            n_jobs=1,
+            run_mode=None,
+        )
+
+        self.assertIsNotNone(best_x)
+        self.assertTrue(all(np.allclose(values % 0.1, 0.0, atol=1e-9) for values in seen_values))
+        self.assertTrue(np.all(best_x >= -1e-12))
+        self.assertTrue(np.all(best_x <= 0.3 + 1e-12))
+        self.assertFalse(np.all(np.equal(best_x, best_x.astype(int))))
+        self.assertAlmostEqual(best_y, history[-1])
 
 
 if __name__ == "__main__":
