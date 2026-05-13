@@ -30,7 +30,7 @@ from ga_lem_inverter.integrations.pecube_fitness import PecubeFitnessEvaluator, 
 from ga_lem_inverter.outputs import RunContext, write_metrics
 from ga_lem_inverter.pipeline.data import read_shapefile, load_dem_data, calculate_shp_rotation_angle, rotate_data, reproject_files_to_geographic
 from ga_lem_inverter.pipeline.preprocessing import interpolate_uplift_cv, unify_array_sizes
-from ga_lem_inverter.pipeline.forward_model import run_fastscape_model
+from ga_lem_inverter.pipeline.forward_model import align_model_field, run_fastscape_model
 from ga_lem_inverter.pipeline.fitness import terrain_similarity
 from ga_lem_inverter.pipeline.optimization import optimize_uplift_ga
 from ga_lem_inverter.pipeline.erosion import create_erosion_field, display_erosion_field, verify_erosion_field
@@ -520,8 +520,7 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
         if rotated_dem_data.shape != rotated_Ksp.shape:
             logging.error(f"Shape mismatch between rotated DEM and Ksp")
             logging.error(f"DEM: {rotated_dem_data.shape}, Ksp: {rotated_Ksp.shape}")
-            # 统一尺寸
-            rotated_dem_data, rotated_Ksp = unify_array_sizes(rotated_dem_data, rotated_Ksp)
+            rotated_Ksp = align_model_field(rotated_Ksp, rotated_dem_data.shape, label="Ksp", order=1)
             logging.info(f"After trimming:")
             logging.info(f"DEM shape: {rotated_dem_data.shape}")
             logging.info(f"Ksp shape: {rotated_Ksp.shape}")

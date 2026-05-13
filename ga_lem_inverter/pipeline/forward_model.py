@@ -5,6 +5,52 @@ from fastscape.models import basic_model
 import logging
 import warnings
 
+
+def align_model_field(field, target_shape, *, label, order=1, fill_value=None):
+    """Align a 2D model field to the DEM/FastScape grid shape."""
+    array = np.asarray(field, dtype=float)
+    if array.ndim != 2:
+        raise ValueError(f"{label} 必须是二维数组，当前 ndim={array.ndim}")
+    target_shape = tuple(int(value) for value in target_shape)
+    if len(target_shape) != 2 or min(target_shape) < 1:
+        raise ValueError(f"目标网格 shape 无效: {target_shape}")
+    if array.shape == target_shape:
+        return array.copy()
+
+    finite = array[np.isfinite(array)]
+    if finite.size == 0:
+        if fill_value is None:
+            raise ValueError(f"{label} 没有有效数值，无法自动对齐。")
+        array = np.full(array.shape, float(fill_value), dtype=float)
+        finite = array.reshape(-1)
+    else:
+        median = float(np.nanmedian(finite))
+        array = np.where(np.isfinite(array), array, median)
+
+    from skimage.transform import resize
+
+    aligned = resize(
+        array,
+        target_shape,
+        order=order,
+        mode="edge",
+        anti_aliasing=order > 0,
+        preserve_range=True,
+    )
+    min_value = float(np.nanmin(finite))
+    max_value = float(np.nanmax(finite))
+    aligned = np.clip(aligned, min_value, max_value)
+    logging.warning("%s shape %s 已自动对齐到 %s。", label, array.shape, target_shape)
+    return aligned.astype(float)
+
+
+def align_fastscape_inputs(k_sp, uplift, *, x_size, y_size):
+    """Align Ksp and uplift fields to the FastScape grid."""
+    target_shape = (int(y_size), int(x_size))
+    k_sp_aligned = align_model_field(k_sp, target_shape, label="Ksp", order=1)
+    uplift_aligned = align_model_field(uplift, target_shape, label="uplift", order=1)
+    return k_sp_aligned, uplift_aligned
+
 def run_fastscape_model(
     k_sp,
     uplift,
@@ -43,15 +89,7 @@ def run_fastscape_model(
         logging.info(f"uplift shape: {uplift.shape}")
         logging.info(f"Requested grid size: {y_size} x {x_size}")
 
-        # 确保尺寸匹配
-        if k_sp.shape != uplift.shape:
-            logging.error(f"Shape mismatch: k_sp {k_sp.shape} vs uplift {uplift.shape}")
-            # 调整到相同尺寸
-            min_rows = min(k_sp.shape[0], uplift.shape[0])
-            min_cols = min(k_sp.shape[1], uplift.shape[1])
-            k_sp = k_sp[:min_rows, :min_cols]
-            uplift = uplift[:min_rows, :min_cols]
-            logging.info(f"Adjusted shapes to: {k_sp.shape}")
+        k_sp, uplift = align_fastscape_inputs(k_sp, uplift, x_size=x_size, y_size=y_size)
 
         # 在运行模型前添加以下代码
         warnings.filterwarnings("ignore", category=FutureWarning,
