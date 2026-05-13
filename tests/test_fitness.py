@@ -29,6 +29,27 @@ class FitnessTests(unittest.TestCase):
 
         self.assertEqual(calls["total"], 3)
 
+    def test_terrain_similarity_is_always_unit_interval(self):
+        """产品验收：地形相似度必须稳定落在 0-1，不能把超界值传给 GA 造成假失败。"""
+        target = np.arange(64 * 64, dtype=float).reshape(64, 64)
+        generated = np.flipud(target) * 100.0
+
+        similarity = fitness.terrain_similarity(target, generated, use_lpips=False)
+
+        self.assertGreaterEqual(similarity, 0.0)
+        self.assertLessEqual(similarity, 1.0)
+
+    def test_terrain_similarity_handles_flat_fields_without_nan(self):
+        """产品验收：平坦 DEM 或退化候选地形不能产生 NaN/Inf。"""
+        target = np.ones((64, 64), dtype=float)
+        generated = np.zeros((64, 64), dtype=float)
+
+        similarity = fitness.terrain_similarity(target, generated, use_lpips=False)
+
+        self.assertTrue(np.isfinite(similarity))
+        self.assertGreaterEqual(similarity, 0.0)
+        self.assertLessEqual(similarity, 1.0)
+
 
 if __name__ == "__main__":
     unittest.main()

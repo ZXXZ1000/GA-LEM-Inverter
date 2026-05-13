@@ -19,15 +19,20 @@ def terrain_mae(matrix1, matrix2):
 
 def terrain_ssim(matrix1, matrix2):
     """计算两个地形矩阵之间的结构相似性指数（Structural Similarity Index, SSIM）"""
-    ssim_index = ssim(matrix1, matrix2, data_range=matrix1.max() - matrix1.min())
-    return ssim_index
+    data_range = max(float(matrix1.max() - matrix1.min()), 1e-12)
+    ssim_index = ssim(matrix1, matrix2, data_range=data_range)
+    return _unit_interval(ssim_index)
 
 def terrain_correlation(matrix1, matrix2):
     """计算两个地形矩阵之间的相关系数"""
     flat1 = matrix1.flatten()
     flat2 = matrix2.flatten()
+    if np.var(flat1) <= 1e-12 or np.var(flat2) <= 1e-12:
+        return 1.0 if np.allclose(flat1, flat2) else 0.0
     correlation, _ = stats.pearsonr(flat1, flat2)
-    return correlation
+    if not np.isfinite(correlation):
+        return 0.0
+    return _unit_interval((correlation + 1.0) / 2.0)
 
 def hypscurve(dem, bins=60):
     """
@@ -239,11 +244,19 @@ def compare_features(feature1, feature2):
         variance_sum = np.var(feature1[0]) + np.var(feature2[0])
         if variance_sum <= 1e-12:
             return 1.0 if np.allclose(feature1[0], feature2[0]) else 0.0
-        return 1 - mean_squared_error(feature1[0], feature2[0]) / variance_sum
+        return _unit_interval(1 - mean_squared_error(feature1[0], feature2[0]) / variance_sum)
     variance_sum = np.var(feature1) + np.var(feature2)
     if variance_sum <= 1e-12:
         return 1.0 if np.allclose(feature1, feature2) else 0.0
-    return 1 - mean_squared_error(feature1, feature2) / variance_sum
+    return _unit_interval(1 - mean_squared_error(feature1, feature2) / variance_sum)
+
+
+def _unit_interval(value):
+    """Return a finite metric value in the 0-1 interval."""
+    value = float(value)
+    if not np.isfinite(value):
+        return 0.0
+    return float(np.clip(value, 0.0, 1.0))
 
 def terrain_hash(dem, bits=256):
     """
@@ -365,7 +378,7 @@ def terrain_similarity(matrix1, matrix2, resolution=347.4, smooth_radius=3, use_
 
         # 归一化MAE
         max_possible_mae = max(np.max(norm_matrix1) - np.min(norm_matrix1), 1e-12)
-        normalized_mae = 1 - (mae / max_possible_mae)
+        normalized_mae = _unit_interval(1 - (mae / max_possible_mae))
 
         if use_lpips:
             def terrain_perceptual_distance(matrix1, matrix2):
@@ -392,7 +405,7 @@ def terrain_similarity(matrix1, matrix2, resolution=347.4, smooth_radius=3, use_
 
                     return distance.item()
 
-            terrain_similarity_DL = 1-terrain_perceptual_distance(norm_matrix1, norm_matrix2)
+            terrain_similarity_DL = _unit_interval(1 - terrain_perceptual_distance(norm_matrix1, norm_matrix2))
         else:
             terrain_similarity_DL = terrien_sim
 
@@ -405,7 +418,7 @@ def terrain_similarity(matrix1, matrix2, resolution=347.4, smooth_radius=3, use_
             0.10 * ssim_score
         )
         #total_sim = terrien_sim * terrain_similarity_DL
-        return total_sim
+        return _unit_interval(total_sim)
     except Exception as e:
         logging.error(f"计算地形相似度出错: {e}")
         raise RuntimeError(f"计算地形相似度出错: {e}")
