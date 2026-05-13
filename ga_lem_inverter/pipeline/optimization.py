@@ -539,20 +539,13 @@ class MyGA:
                 self.current_gen = gen  # 更新当前代数
 
                 # 评估当前种群
-                self.X = self.Chrom
+                self.X = self.Chrom.copy()
                 self.Y = parallel_fitness(self.func, self.X, n_jobs=self.n_jobs)
 
-                # 排序和选择
+                # 排序后立即记录本代最优个体。此时 self.Chrom 和 self.Y 是对应关系；
+                # 后续 selection/crossover/mutation 会改写种群，必须先 copy 固定下来。
                 self.ranking()
-                self.selection()
-
-                # 交叉和变异
-                self.crossover()
-                self.mutation()
-
-                # 更新最优解
-                gen_best_index = self.Y.argmin()
-                current_best = (self.X[gen_best_index], self.Y[gen_best_index])
+                current_best = (self.Chrom[0].copy(), float(self.Y[0]))
 
                 if best is None or current_best[1] < best[1]:
                     best = current_best
@@ -561,6 +554,11 @@ class MyGA:
                 else:
                     no_improve_count += 1
                     fitness_history.append(best[1])
+
+                # 选择、交叉和变异会生成下一代，不能再用这之后的种群记录当前代最优。
+                self.selection()
+                self.crossover()
+                self.mutation()
 
                 # 检查是否需要注入多样性
                 if (no_improve_count >= diversity_threshold and
