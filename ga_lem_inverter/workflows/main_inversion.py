@@ -79,6 +79,23 @@ def _config_float(
 from ga_lem_inverter.pipeline.path_validator import verify_config_paths, verify_file_path
 
 
+def validate_low_resolution_shape(shape: tuple[int, int], scale_factor: int) -> tuple[int, int]:
+    """Validate the GA control grid implied by DEM shape and scale_factor."""
+    rows, cols = (int(shape[0]), int(shape[1]))
+    scale_factor = int(scale_factor)
+    if scale_factor < 1:
+        raise UserConfigError(f"scale_factor 必须 >= 1，当前为 {scale_factor}。")
+    if rows < 2 or cols < 2:
+        raise UserConfigError(f"DEM 尺寸太小，无法优化: shape={(rows, cols)}。")
+    low_res_shape = (rows // scale_factor, cols // scale_factor)
+    if min(low_res_shape) < 1:
+        raise UserConfigError(
+            f"scale_factor={scale_factor} 对 DEM shape={(rows, cols)} 过大，"
+            "会导致低分辨率隆升控制网格为 0。请减小 scale_factor 或使用更大的 DEM。"
+        )
+    return low_res_shape
+
+
 def _json_metric_value(value):
     if isinstance(value, (int, float, np.integer, np.floating)):
         return float(value)
@@ -467,7 +484,7 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
         row, col = dem_data.shape # 使用原始 dem_data 的 shape
         ORIGINAL_SHAPE = (row, col)
         scale_factor = config.getint('Preprocessing', 'scale_factor')
-        LOW_RES_SHAPE = (row // scale_factor, col // scale_factor)
+        LOW_RES_SHAPE = validate_low_resolution_shape(ORIGINAL_SHAPE, scale_factor)
         logging.info(f"Original shape: {ORIGINAL_SHAPE}")
         logging.info(f"Low resolution shape: {LOW_RES_SHAPE}")
 
@@ -537,7 +554,7 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
         resampled_dem = rotated_dem_data
         row, col = resampled_dem.shape  # 更新为旋转后的尺寸
         ORIGINAL_SHAPE = (row, col)     # 更新为旋转后的尺寸
-        LOW_RES_SHAPE = (row // scale_factor, col // scale_factor)
+        LOW_RES_SHAPE = validate_low_resolution_shape(ORIGINAL_SHAPE, scale_factor)
 
         # 更新 dem_profile
         dem_profile['height'] = row
@@ -551,7 +568,7 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
                 return False
             row, col = resampled_dem.shape
             ORIGINAL_SHAPE = (row, col)
-            LOW_RES_SHAPE = (row // scale_factor, col // scale_factor)
+            LOW_RES_SHAPE = validate_low_resolution_shape(ORIGINAL_SHAPE, scale_factor)
             logging.info(f"Validated shapes: ORIGINAL_SHAPE={ORIGINAL_SHAPE}, LOW_RES_SHAPE={LOW_RES_SHAPE}")
             return True
 
@@ -583,7 +600,7 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
         logging.info("Step 5: 模型参数设置")
 
 
-        LOW_RES_SHAPE = (row // scale_factor, col // scale_factor) # 重新计算 LOW_RES_SHAPE
+        LOW_RES_SHAPE = validate_low_resolution_shape((row, col), scale_factor) # 重新计算 LOW_RES_SHAPE
         logging.info(f"Resampled shape after rotation: {ORIGINAL_SHAPE}") #  注意这里 ORIGINAL_SHAPE 仍然是原始shape，应该输出 resampled_dem.shape 或 ORIGINAL_SHAPE = resampled_dem.shape
         logging.info(f"Low resolution shape: {LOW_RES_SHAPE}")
 
