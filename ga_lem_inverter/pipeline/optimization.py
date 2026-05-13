@@ -36,6 +36,71 @@ def _decode_uplift_vector(encoded_vector, precision):
     """把 GA 内部整数编码解码成真实隆升率 mm/yr。"""
     return np.asarray(encoded_vector, dtype=float) * precision
 
+
+def _safe_int_bounds(lb, ub):
+    lb_array = np.asarray(lb).reshape(-1)
+    ub_array = np.asarray(ub).reshape(-1)
+    lb_val = int(round(float(lb_array[0])))
+    ub_val = int(round(float(ub_array[0])))
+    if lb_val > ub_val:
+        raise ValueError(f"Invalid GA bounds: lb={lb_val}, ub={ub_val}")
+    return lb_val, ub_val
+
+
+def _terrain_prior_vector(matrix, low_res_shape, lb, ub):
+    """把 DEM 安全映射成 GA 整数编码 prior；平坦或异常 DEM 退化为中值场。"""
+    lb_val, ub_val = _safe_int_bounds(lb, ub)
+    midpoint = int(round((lb_val + ub_val) / 2))
+
+    terrain = np.asarray(matrix, dtype=float)
+    if terrain.size == 0 or not np.isfinite(terrain).any():
+        return np.full(int(np.prod(low_res_shape)), midpoint, dtype=int)
+
+    finite_values = terrain[np.isfinite(terrain)]
+    fill_value = float(np.nanmedian(finite_values))
+    terrain = np.where(np.isfinite(terrain), terrain, fill_value)
+    smoothed_matrix = gaussian_filter(terrain, sigma=5)
+
+    if smoothed_matrix.shape != low_res_shape:
+        from skimage.transform import resize
+        smoothed_matrix = resize(
+            smoothed_matrix,
+            low_res_shape,
+            mode='edge',
+            anti_aliasing=True,
+            preserve_range=True
+        )
+
+    min_val = float(np.nanmin(smoothed_matrix))
+    max_val = float(np.nanmax(smoothed_matrix))
+    value_range = max_val - min_val
+    if not np.isfinite(value_range) or value_range <= 1e-12:
+        return np.full(int(np.prod(low_res_shape)), midpoint, dtype=int)
+
+    scaled_matrix = (smoothed_matrix - min_val) / value_range
+    scaled_matrix = lb_val + (ub_val - lb_val) * scaled_matrix
+    return np.clip(np.rint(scaled_matrix), lb_val, ub_val).astype(int).flatten()
+
+
+def _smooth_random_population(count, n_dim, low_res_shape, lb, ub):
+    """生成平滑随机场个体，作为非 DEM prior 的空间结构初始化。"""
+    lb_val, ub_val = _safe_int_bounds(lb, ub)
+    if count <= 0:
+        return np.empty((0, n_dim), dtype=int)
+
+    individuals = np.zeros((count, n_dim), dtype=int)
+    for i in range(count):
+        field = gaussian_filter(np.random.rand(*low_res_shape), sigma=1)
+        min_val = float(field.min())
+        max_val = float(field.max())
+        if max_val - min_val <= 1e-12:
+            scaled = np.full(low_res_shape, (lb_val + ub_val) / 2)
+        else:
+            scaled = (field - min_val) / (max_val - min_val)
+            scaled = lb_val + (ub_val - lb_val) * scaled
+        individuals[i, :] = np.clip(np.rint(scaled), lb_val, ub_val).astype(int).flatten()
+    return individuals
+
 class MyGA:
     """自定义遗传算法类，专门用于隆升率场优化"""
     def __init__(self, func, n_dim, size_pop=50, max_iter=200, prob_mut=0.01,
@@ -101,33 +166,17 @@ class MyGA:
             raise ValueError(f"Invalid low_res_shape: {low_res_shape}. Expected product to be {self.n_dim}")
 
         self.low_res_shape = low_res_shape
-        terrain_pop_size = int(self.size_pop * (1 - random_fraction))
-        random_pop_size = self.size_pop - terrain_pop_size
+        random_pop_size = int(self.size_pop * random_fraction)
+        smooth_random_pop_size = max(1, int(self.size_pop * 0.2)) if self.size_pop >= 3 else 0
+        terrain_pop_size = self.size_pop - random_pop_size - smooth_random_pop_size
+        if terrain_pop_size < 0:
+            terrain_pop_size = 0
+            smooth_random_pop_size = self.size_pop - random_pop_size
         initial_population = np.zeros((self.size_pop, self.n_dim), dtype=int)
+        lb_val, ub_val = _safe_int_bounds(lb, ub)
 
         if terrain_pop_size > 0:
-            # 对地形进行平滑处理
-            smoothed_matrix = gaussian_filter(matrix, sigma=5)
-
-            # 调整矩阵大小
-            if smoothed_matrix.shape != low_res_shape:
-                from skimage.transform import resize
-                smoothed_matrix = resize(smoothed_matrix,
-                                      low_res_shape,
-                                      mode='edge',
-                                      anti_aliasing=True)
-
-            # 映射到参数范围
-            min_val = np.nanmin(smoothed_matrix)
-            max_val = np.nanmax(smoothed_matrix)
-            lb_val = lb if isinstance(lb, (int, float)) else lb[0]
-            ub_val = ub if isinstance(ub, (int, float)) else ub[0]
-
-            scaled_matrix = (smoothed_matrix - min_val) / (max_val - min_val)
-            scaled_matrix = lb_val + (ub_val - lb_val) * scaled_matrix
-            scaled_matrix = np.clip(scaled_matrix, lb_val, ub_val).astype(int)
-
-            initial_vector = scaled_matrix.flatten()
+            initial_vector = _terrain_prior_vector(matrix, low_res_shape, lb_val, ub_val)
             terrain_individuals = np.zeros((terrain_pop_size, self.n_dim), dtype=int)
 
             for i in range(terrain_pop_size):
@@ -138,15 +187,24 @@ class MyGA:
 
             initial_population[:terrain_pop_size, :] = terrain_individuals
 
+        smooth_start = terrain_pop_size
+        smooth_end = smooth_start + smooth_random_pop_size
+        if smooth_random_pop_size > 0:
+            initial_population[smooth_start:smooth_end, :] = _smooth_random_population(
+                smooth_random_pop_size,
+                self.n_dim,
+                low_res_shape,
+                lb_val,
+                ub_val
+            )
+
         if random_pop_size > 0:
-            lb_val = lb if isinstance(lb, (int, float)) else lb[0]
-            ub_val = ub if isinstance(ub, (int, float)) else ub[0]
             random_individuals = np.random.randint(
                 lb_val,
                 ub_val + 1,
                 size=(random_pop_size, self.n_dim)
             )
-            initial_population[terrain_pop_size:, :] = random_individuals
+            initial_population[smooth_end:, :] = random_individuals
 
         self.Chrom = initial_population
 
@@ -505,29 +563,9 @@ class MyGA:
         # 3. 基于地形的注入
         if terrain_size > 0 and resampled_dem is not None and self.low_res_shape is not None:
             terrain_start = elite_size + random_size + best_based_size
-
-            # 对地形进行平滑处理
-            smoothed_matrix = gaussian_filter(resampled_dem, sigma=5)
-
-            # 调整矩阵大小
-            if smoothed_matrix.shape != self.low_res_shape:
-                from skimage.transform import resize
-                smoothed_matrix = resize(smoothed_matrix,
-                                      self.low_res_shape,
-                                      mode='edge',
-                                      anti_aliasing=True)
-
-            # 映射到参数范围
-            min_val = np.nanmin(smoothed_matrix)
-            max_val = np.nanmax(smoothed_matrix)
             lb_val = self.lb[0] if isinstance(self.lb, np.ndarray) else self.lb
             ub_val = self.ub[0] if isinstance(self.ub, np.ndarray) else self.ub
-
-            scaled_matrix = (smoothed_matrix - min_val) / (max_val - min_val)
-            scaled_matrix = lb_val + (ub_val - lb_val) * scaled_matrix
-            scaled_matrix = np.clip(scaled_matrix, lb_val, ub_val).astype(int)
-
-            initial_vector = scaled_matrix.flatten()
+            initial_vector = _terrain_prior_vector(resampled_dem, self.low_res_shape, lb_val, ub_val)
 
             for i in range(terrain_start, self.size_pop):
                 # 添加较大的随机噪声

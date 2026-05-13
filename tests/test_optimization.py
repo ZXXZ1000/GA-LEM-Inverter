@@ -118,6 +118,72 @@ class MyGATests(unittest.TestCase):
                     self.assertTrue(np.all(child2 >= 0))
                     self.assertTrue(np.all(child2 <= 100))
 
+    def test_terrain_initialization_handles_flat_and_nonfinite_dem(self):
+        """平坦、NaN、Inf DEM 不应让 terrain prior 初始化产生 NaN 或越界。"""
+        matrices = [
+            np.ones((6, 6), dtype=float),
+            np.array(
+                [
+                    [np.nan, np.inf, 1.0, 1.0, 1.0, 1.0],
+                    [1.0, 1.0, np.nan, 1.0, 1.0, 1.0],
+                    [1.0, 1.0, 1.0, np.inf, 1.0, 1.0],
+                    [1.0, 1.0, 1.0, 1.0, np.nan, 1.0],
+                    [1.0, 1.0, 1.0, 1.0, 1.0, np.inf],
+                    [1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+                ],
+                dtype=float,
+            ),
+        ]
+
+        for matrix in matrices:
+            with self.subTest(matrix=matrix):
+                ga = MyGA(
+                    func=lambda x: 0.0,
+                    n_dim=9,
+                    size_pop=10,
+                    max_iter=1,
+                    prob_mut=0,
+                    lb=1,
+                    ub=10,
+                    n_jobs=1,
+                )
+                ga.init_population_based_on_terrain(
+                    matrix=matrix,
+                    lb=1,
+                    ub=10,
+                    low_res_shape=(3, 3),
+                    noise_level=0,
+                    random_fraction=0.2,
+                )
+
+                self.assertEqual(ga.Chrom.shape, (10, 9))
+                self.assertTrue(np.isfinite(ga.Chrom).all())
+                self.assertTrue(np.all(ga.Chrom >= 1))
+                self.assertTrue(np.all(ga.Chrom <= 10))
+                self.assertGreater(len(np.unique(ga.Chrom, axis=0)), 1)
+
+    def test_diversity_injection_handles_flat_dem(self):
+        """停滞注入时的地形 prior 也要能处理平坦 DEM。"""
+        ga = MyGA(
+            func=lambda x: 0.0,
+            n_dim=9,
+            size_pop=10,
+            max_iter=1,
+            prob_mut=0,
+            lb=1,
+            ub=10,
+            n_jobs=1,
+        )
+        ga.low_res_shape = (3, 3)
+        ga.Chrom = np.ones((10, 9), dtype=int)
+
+        ga.inject_diversity(best_x=np.full(9, 5, dtype=int), resampled_dem=np.ones((6, 6), dtype=float))
+
+        self.assertEqual(ga.Chrom.shape, (10, 9))
+        self.assertTrue(np.isfinite(ga.Chrom).all())
+        self.assertTrue(np.all(ga.Chrom >= 1))
+        self.assertTrue(np.all(ga.Chrom <= 10))
+
 
 if __name__ == "__main__":
     unittest.main()
