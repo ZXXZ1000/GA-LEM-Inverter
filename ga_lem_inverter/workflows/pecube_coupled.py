@@ -52,7 +52,6 @@ def run_pecube_coupled_workflow(config: configparser.ConfigParser, context: RunC
 
     topographies: list[np.ndarray] = []
     uplifts: list[np.ndarray] = []
-    temperatures: list[np.ndarray] = []
     for index in range(n_steps):
         factor = (index + 1) / n_steps
         uplift = true_uplift * factor
@@ -72,13 +71,11 @@ def run_pecube_coupled_workflow(config: configparser.ConfigParser, context: RunC
         # Pecube expects uplift in a simple grid sequence. Use mm/yr values for
         # the data files and a separate uniform velocity in Pecube.in.
         uplifts.append(np.asarray(uplift, dtype=float))
-        temperatures.append(np.zeros(shape, dtype=float))
 
     pecube_dir = context.root / "pecube"
     result = engine.run(
-        topography_series=topographies,
-        uplift_series=uplifts,
-        temperature_series=temperatures,
+        topography_series=list(reversed(topographies)),
+        uplift_series=list(reversed(uplifts)),
         sample_observations=engine.config.sample_observations,
         output_dir=pecube_dir,
     )
@@ -145,6 +142,7 @@ def run_pecube_coupled_workflow(config: configparser.ConfigParser, context: RunC
             target_dem=topographies[0],
             generated_dem=topographies[-1],
             uplift=uplifts[-1],
+            pixel_predictions=None,
             path=dashboard_path,
         )
         context.add_artifact(dashboard_path)

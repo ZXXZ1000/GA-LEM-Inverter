@@ -6,6 +6,45 @@ import logging
 import warnings
 
 
+VALID_BOUNDARY_STATUS = {"fixed_value", "core", "looped"}
+
+
+def normalize_boundary_status(status):
+    """Return FastScape boundary status as scalar or [left, right, top, bottom]."""
+    if status is None:
+        return "fixed_value"
+    if isinstance(status, str):
+        text = status.strip()
+        if not text:
+            return "fixed_value"
+        parts = [part.strip() for part in text.replace(";", ",").split(",") if part.strip()]
+        if len(parts) == 1:
+            value = parts[0]
+            if value not in VALID_BOUNDARY_STATUS:
+                raise ValueError(f"无效 boundary_status={value!r}，可选: {sorted(VALID_BOUNDARY_STATUS)}")
+            return value
+        status_list = parts
+    else:
+        status_list = list(status)
+
+    if len(status_list) != 4:
+        raise ValueError("boundary_status 四边写法必须是 left,right,top,bottom 四个值。")
+    invalid = [value for value in status_list if value not in VALID_BOUNDARY_STATUS]
+    if invalid:
+        raise ValueError(f"无效边界状态 {invalid}，可选: {sorted(VALID_BOUNDARY_STATUS)}")
+    if "fixed_value" not in status_list:
+        raise ValueError("FastScape 至少需要一条 fixed_value 边界作为数值约束。")
+    return status_list
+
+
+def boundary_status_from_config(config, section="Model"):
+    """Read scalar or per-edge FastScape boundary status from config."""
+    edge_keys = ("boundary_left", "boundary_right", "boundary_top", "boundary_bottom")
+    if all(config.has_option(section, key) for key in edge_keys):
+        return normalize_boundary_status([config.get(section, key).strip() for key in edge_keys])
+    return normalize_boundary_status(config.get(section, "boundary_status", fallback="fixed_value"))
+
+
 def align_model_field(field, target_shape, *, label, order=1, fill_value=None):
     """Align a 2D model field to the DEM/FastScape grid shape."""
     array = np.asarray(field, dtype=float)
@@ -92,16 +131,23 @@ def run_fastscape_series(
         logging.info(f"Requested grid size: {y_size} x {x_size}")
 
         k_sp, uplift = align_fastscape_inputs(k_sp, uplift, x_size=x_size, y_size=y_size)
+        boundary_status = normalize_boundary_status(boundary_status)
 
         output_steps = max(2, int(output_steps))
 
         # 在运行模型前添加以下代码
         warnings.filterwarnings("ignore", category=FutureWarning,
                             message="variable .* with name matching its dimension")
+        # Pecube cannot reliably consume FastScape's raw t=0 random seed
+        # topography as the oldest surface. Emit only evolved snapshots while
+        # keeping the output clock aligned with the master clock.
+        master_times = np.linspace(0, time_total, 101)
+        output_steps = min(output_steps, len(master_times) - 1)
+        output_indices = np.linspace(1, len(master_times) - 1, output_steps, dtype=int)
+        out_times = master_times[output_indices]
         ds_in = xs.create_setup(
             model=basic_model,
-            clocks={'time': np.linspace(0, time_total, 101),
-                    'out': np.linspace(0, time_total, output_steps)},
+            clocks={'time': master_times, 'out': out_times},
             master_clock='time',
             input_vars={
                 'grid__shape': [y_size, x_size],

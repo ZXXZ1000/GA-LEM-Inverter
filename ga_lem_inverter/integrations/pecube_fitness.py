@@ -25,10 +25,15 @@ from rasterio.crs import CRS
 from rasterio.transform import Affine, from_bounds
 from rasterio.warp import transform_bounds
 from rasterio.warp import Resampling, reproject
+from scipy import ndimage
+from shapely.geometry import Point
+import geopandas as gpd
 
 from ga_lem_inverter.integrations.pecube import PecubeEngine
 from ga_lem_inverter.integrations.pecube_parser import PecubeParsedOutput
+from ga_lem_inverter.integrations.pecube_project import PecubeProjectConfig, surface_temperature_from_topography
 from ga_lem_inverter.outputs import RunContext
+from ga_lem_inverter.pipeline.visualization import flipped_display_array, map_geometries_to_pixel_space
 
 
 REQUIRED_OBSERVATION_COLUMNS = ("sample_id", "elevation", "system", "observed_age", "sigma")
@@ -121,7 +126,7 @@ class PecubeSpatialAdapter:
             src_nodata=np.nan,
             dst_nodata=np.nan,
         )
-        return destination
+        return fill_pecube_nan_grid(destination)
 
 
 @dataclass(frozen=True)
@@ -173,6 +178,8 @@ class PecubeFitnessEvaluator:
         self.fail_strategy = self._str("Pecube", "fail_strategy", "penalty").lower()
         self.penalty_loss = self._float("Pecube", "penalty_loss", 1.0)
         self.thermo_loss_scale = max(self._float("Fitness", "thermo_loss_scale", 5.0), 1e-12)
+        self.thermo_sigma_min = max(self._float("Fitness", "thermo_sigma_min", 0.0), 0.0)
+        self.thermo_sigma_relative = max(self._float("Fitness", "thermo_sigma_relative", 0.0), 0.0)
         self.observation_coordinate_system = self._str("Pecube", "observation_coordinate_system", "pecube_output").lower()
         self.observation_crs = self._str("Pecube", "observation_crs", "auto")
         self.evaluation_count = 0
@@ -182,6 +189,7 @@ class PecubeFitnessEvaluator:
         self.history_dir = self.context.root / "pecube" / "fitness_history"
         self.spatial_adapter: PecubeSpatialAdapter | None = None
         self.target_dem_pecube = self.target_dem
+        self.target_dem_pixel = flipped_display_array(self.target_dem)
 
         if self.enabled:
             self.engine.validate()
@@ -257,6 +265,41 @@ class PecubeFitnessEvaluator:
                 observation_crs=self.observation_crs,
             )
 
+    def observation_pixels(self, predictions: list["ThermochronologyPrediction"] | None = None) -> list[dict[str, float]]:
+        if self.spatial_adapter is None:
+            return []
+        items = predictions if predictions is not None else (self.best_result.predictions if self.best_result is not None else [])
+        if not items:
+            return []
+        points = gpd.GeoDataFrame(
+            {"sample_id": [p.sample_id for p in items], "predicted_age": [p.predicted_age for p in items]},
+            geometry=[Point(p.x, p.y) for p in items],
+            crs="EPSG:4326",
+        ).to_crs(self.spatial_adapter.source_crs)
+        pixel_points = map_geometries_to_pixel_space(
+            points,
+            Affine(*self.spatial_adapter.source_transform),
+            height=self.spatial_adapter.source_shape[0],
+            width=self.spatial_adapter.source_shape[1],
+            flip_vertical=True,
+            flip_horizontal=True,
+        )
+        rows: list[dict[str, float]] = []
+        for item, geom in zip(items, pixel_points.geometry):
+            rows.append(
+                {
+                    "sample_id": item.sample_id,
+                    "x": float(geom.x),
+                    "y": float(geom.y),
+                    "predicted_age": float(item.predicted_age),
+                    "observed_age": float(item.observed_age),
+                    "residual": float(item.residual),
+                    "elevation": float(item.elevation),
+                    "system": item.system,
+                }
+            )
+        return rows
+
     def evaluate(
         self,
         *,
@@ -327,12 +370,11 @@ class PecubeFitnessEvaluator:
                 fallback_array=uplift_pecube,
                 expected_len=len(pecube_topographies),
                 label="uplift_series",
+                reverse=True,
             )
-            pecube_temperatures = self._prepare_model_series(
+            pecube_temperatures = self._prepare_temperature_series(
                 series=temperature_series,
-                fallback_array=np.zeros_like(pecube_topographies[0]),
-                expected_len=len(pecube_topographies),
-                label="temperature_series",
+                topographies=pecube_topographies,
             )
             result = self.engine.run(
                 topography_series=pecube_topographies,
@@ -341,10 +383,15 @@ class PecubeFitnessEvaluator:
                 sample_observations=self.engine.config.sample_observations,
                 output_dir=eval_dir,
             )
-            predictions = predictions_from_parsed(result.parsed, self.observations)
+            predictions = predictions_from_parsed(
+                result.parsed,
+                self.observations,
+                sigma_min=self.thermo_sigma_min,
+                sigma_relative=self.thermo_sigma_relative,
+            )
             thermo_loss_raw = normalized_rmse([p.normalized_residual for p in predictions])
             terrain_loss_norm = normalize_unit_loss(terrain_loss)
-            thermo_loss = normalize_unit_loss(thermo_loss_raw / self.thermo_loss_scale)
+            thermo_loss = scaled_unit_loss(thermo_loss_raw, self.thermo_loss_scale)
             total = weighted_unit_loss(terrain_loss_norm, thermo_loss, self.terrain_weight, self.thermo_weight)
             constraint = PecubeConstraintResult(
                 enabled=True,
@@ -363,6 +410,7 @@ class PecubeFitnessEvaluator:
                     "pecube_topography_frames": len(pecube_topographies),
                     "pecube_uplift_frames": len(pecube_uplifts),
                     "pecube_temperature_frames": len(pecube_temperatures),
+                    "pecube_time_order": "present_to_past",
                 },
             )
             self._record(constraint, evaluation_id=evaluation_id)
@@ -398,6 +446,7 @@ class PecubeFitnessEvaluator:
         *,
         generated_dem: np.ndarray | None = None,
         uplift: np.ndarray | None = None,
+        output_border_crop: int = 0,
     ) -> dict[str, Any]:
         if not self.enabled:
             return {"pecube_enabled": False}
@@ -432,16 +481,34 @@ class PecubeFitnessEvaluator:
 
         age_surface_path = self.context.figure_path("pecube_age_surface_map.png")
         generated_dem_pecube = self._to_pecube_grid(generated_dem) if generated_dem is not None else self.target_dem_pecube
-        uplift_pecube = self._to_pecube_grid(uplift) if uplift is not None else None
-        plot_age_surface_map(
-            self.best_result.predictions,
-            age_surface_path,
-            terrain=generated_dem_pecube,
-            lon0=self.engine.config.lon0,
-            lat0=self.engine.config.lat0,
-            dlon=self.engine.config.dlon,
-            dlat=self.engine.config.dlat,
+        generated_dem_pixel = flipped_display_array(generated_dem) if generated_dem is not None else self.target_dem_pixel
+        uplift_pixel = flipped_display_array(uplift) if uplift is not None else None
+        pixel_predictions = self.observation_pixels(self.best_result.predictions)
+        crop_width = max(int(output_border_crop or 0), 0)
+        target_dem_pixel = crop_pixel_border(self.target_dem_pixel, crop_width)
+        generated_dem_pixel_plot = crop_pixel_border(generated_dem_pixel, crop_width)
+        uplift_pixel_plot = crop_pixel_border(uplift_pixel, crop_width) if uplift_pixel is not None else None
+        pixel_predictions_plot = shift_pixel_predictions_for_crop(
+            pixel_predictions,
+            crop_width,
+            generated_dem_pixel_plot.shape if generated_dem_pixel_plot is not None else target_dem_pixel.shape,
         )
+        if pixel_predictions_plot:
+            plot_age_surface_map_pixels(
+                pixel_predictions_plot,
+                age_surface_path,
+                terrain=generated_dem_pixel_plot,
+            )
+        else:
+            plot_age_surface_map(
+                self.best_result.predictions,
+                age_surface_path,
+                terrain=generated_dem_pecube,
+                lon0=self.engine.config.lon0,
+                lat0=self.engine.config.lat0,
+                dlon=self.engine.config.dlon,
+                dlat=self.engine.config.dlat,
+            )
         self.context.add_artifact(age_surface_path)
 
         loss_history_path = self.context.figure_path("pecube_loss_history.png")
@@ -452,9 +519,10 @@ class PecubeFitnessEvaluator:
         plot_pecube_dashboard(
             predictions=self.best_result.predictions,
             history=self.history,
-            target_dem=self.target_dem_pecube,
-            generated_dem=generated_dem_pecube if generated_dem is not None else None,
-            uplift=uplift_pecube,
+            target_dem=target_dem_pixel,
+            generated_dem=generated_dem_pixel_plot if generated_dem is not None else None,
+            uplift=uplift_pixel_plot,
+            pixel_predictions=pixel_predictions_plot,
             path=dashboard_path,
         )
         self.context.add_artifact(dashboard_path)
@@ -503,12 +571,17 @@ class PecubeFitnessEvaluator:
         topography_series: np.ndarray | list[np.ndarray] | None,
     ) -> list[np.ndarray]:
         if topography_series is None:
-            return [self.target_dem_pecube, generated_dem_pecube]
+            return [generated_dem_pecube, generated_dem_pecube.copy()]
         series = [self._to_pecube_grid(array) for array in np.asarray(topography_series, dtype=float)]
         if len(series) < 2:
             raise ValueError("Pecube topography_series 至少需要两帧。")
+        # FastScape emits forward-model snapshots from early model time to the
+        # final candidate surface. Pecube directory-mode input expects topo0 at
+        # time zero (present day), followed by older topographies.
         series[-1] = generated_dem_pecube
-        return series
+        present_to_past = list(reversed(series))
+        present_to_past[0] = generated_dem_pecube
+        return present_to_past
 
     def _prepare_model_series(
         self,
@@ -517,6 +590,7 @@ class PecubeFitnessEvaluator:
         fallback_array: np.ndarray,
         expected_len: int,
         label: str,
+        reverse: bool = False,
     ) -> list[np.ndarray]:
         if expected_len < 2:
             raise ValueError(f"Pecube {label} 需要至少两帧，当前 {expected_len}。")
@@ -524,8 +598,30 @@ class PecubeFitnessEvaluator:
             return [np.asarray(fallback_array, dtype=float).copy() for _ in range(expected_len)]
         prepared = [self._to_pecube_grid(array) for array in np.asarray(series, dtype=float)]
         if len(prepared) != expected_len:
-            raise ValueError(f"Pecube {label} 帧数必须等于 topography_series，期望 {expected_len}，得到 {len(prepared)}。")
+            raise ValueError(f"Pecube {label} 帧数必须等于 topography_series: {len(prepared)} != {expected_len}。")
+        if reverse:
+            prepared = list(reversed(prepared))
         return prepared
+
+    def _prepare_temperature_series(
+        self,
+        *,
+        series: np.ndarray | list[np.ndarray] | None,
+        topographies: list[np.ndarray],
+    ) -> list[np.ndarray]:
+        if series is not None:
+            return self._prepare_model_series(
+                series=series,
+                fallback_array=np.zeros_like(topographies[0]),
+                expected_len=len(topographies),
+                label="temperature_series",
+                reverse=True,
+            )
+        project_config = PecubeProjectConfig(
+            sea_level_temperature=self.engine.config.sea_level_temperature,
+            lapse_rate=self.engine.config.lapse_rate,
+        )
+        return [surface_temperature_from_topography(array, project_config) for array in topographies]
 
     def _record(self, result: PecubeConstraintResult, *, evaluation_id: int) -> None:
         row = {
@@ -613,6 +709,23 @@ class PecubeFitnessEvaluator:
 
     def _str(self, section: str, key: str, default: str) -> str:
         return self.config.get(section, key, fallback=default) if section in self.config else default
+
+
+def fill_pecube_nan_grid(array: np.ndarray) -> np.ndarray:
+    """Fill NaNs created during DEM -> Pecube reprojection.
+
+    Pecube's Fortran kernels cannot tolerate NaN values in topo/uplift/temp
+    grids. Keep valid cells untouched and fill gaps with nearest valid values.
+    """
+    grid = np.asarray(array, dtype=float).copy()
+    mask = np.isfinite(grid)
+    if mask.all():
+        return grid
+    if not mask.any():
+        raise ValueError("Pecube 重投影后的网格全部为 NaN，无法构建有效输入。")
+    indices = ndimage.distance_transform_edt(~mask, return_distances=False, return_indices=True)
+    grid[~mask] = grid[tuple(indices[:, ~mask])]
+    return grid
 
 
 def load_observations(
@@ -926,18 +1039,29 @@ def _parse_float(row: dict[str, str], key: str, line_number: int) -> float:
 def predictions_from_parsed(
     parsed: PecubeParsedOutput,
     observations: list[ThermochronologyObservation],
+    *,
+    sigma_min: float = 0.0,
+    sigma_relative: float = 0.0,
 ) -> list[ThermochronologyPrediction]:
     rows, source_file = _find_prediction_rows(parsed)
     predictions = []
+    sigma_min = max(float(sigma_min), 0.0)
+    sigma_relative = max(float(sigma_relative), 0.0)
     for observation in observations:
         column = _system_column(observation.system)
         if column is None:
             raise ValueError(f"不支持的热年代学体系: {observation.system}")
         nearest = _nearest_prediction_row(rows, observation.x, observation.y)
-        if column not in nearest:
+        value_key = _prediction_value_key(column, nearest)
+        if value_key is None:
             raise ValueError(f"Pecube 输出缺少预测列 {column}，无法匹配样品 {observation.sample_id}。")
-        predicted_age = _float_value(nearest[column], f"Pecube 输出列 {column}")
+        predicted_age = _float_value(nearest[value_key], f"Pecube 输出列 {value_key}")
         residual = predicted_age - observation.observed_age
+        effective_sigma = max(
+            observation.sigma,
+            sigma_min,
+            abs(observation.observed_age) * sigma_relative,
+        )
         predictions.append(
             ThermochronologyPrediction(
                 sample_id=observation.sample_id,
@@ -947,10 +1071,10 @@ def predictions_from_parsed(
                 system=observation.system,
                 observed_age=observation.observed_age,
                 predicted_age=predicted_age,
-                sigma=observation.sigma,
+                sigma=effective_sigma,
                 residual=residual,
-                normalized_residual=residual / observation.sigma,
-                pecube_column=column,
+                normalized_residual=residual / effective_sigma,
+                pecube_column=value_key,
                 source_file=source_file,
             )
         )
@@ -958,8 +1082,15 @@ def predictions_from_parsed(
 
 
 def _find_prediction_rows(parsed: PecubeParsedOutput) -> tuple[list[dict[str, str]], str]:
-    for name, rows in sorted(parsed.csv_files.items()):
+    compare_rows = parsed.csv_files.get("CompareAGE.csv")
+    if compare_rows and {"LON", "LAT"}.issubset(compare_rows[0]):
+        return compare_rows, "CompareAGE.csv"
+
+    for name, rows in sorted(parsed.csv_files.items(), reverse=True):
         if rows and {"Longitude", "Latitude", "Height"}.issubset(rows[0]):
+            return rows, name
+    for name, rows in sorted(parsed.csv_files.items()):
+        if rows and {"LON", "LAT"}.issubset(rows[0]):
             return rows, name
     raise ValueError("Pecube 输出中没有找到包含 Longitude/Latitude/Height 的年龄预测 CSV。")
 
@@ -968,8 +1099,8 @@ def _nearest_prediction_row(rows: list[dict[str, str]], x: float, y: float) -> d
     best_row = None
     best_distance = float("inf")
     for row in rows:
-        lon = _float_value(row.get("Longitude", ""), "Longitude")
-        lat = _float_value(row.get("Latitude", ""), "Latitude")
+        lon = _float_value(row.get("Longitude", row.get("LON", "")), "Longitude/LON")
+        lat = _float_value(row.get("Latitude", row.get("LAT", "")), "Latitude/LAT")
         distance = (lon - x) ** 2 + (lat - y) ** 2
         if distance < best_distance:
             best_distance = distance
@@ -982,6 +1113,27 @@ def _nearest_prediction_row(rows: list[dict[str, str]], x: float, y: float) -> d
 def _system_column(system: str) -> str | None:
     key = system.strip().lower().replace("-", "").replace("_", "")
     return SYSTEM_TO_PECUBE_COLUMN.get(key) or SYSTEM_TO_PECUBE_COLUMN.get(system.strip().lower())
+
+
+def _prediction_value_key(base_column: str, row: dict[str, str]) -> str | None:
+    if base_column in row:
+        return base_column
+    compare_age_mapping = {
+        "HeApatite": "AHEPRED",
+        "HeZircon": "ZHEPRED",
+        "FTApatite": "AFTPRED",
+        "FTZircon": "ZFTPRED",
+        "ArKFeldspar": "KARPRED",
+        "ArBiotite": "BARPRED",
+        "ArMuscovite": "MARPRED",
+        "ArHornblend": "HARPRED",
+    }
+    mapped = compare_age_mapping.get(base_column)
+    if mapped and mapped in row:
+        return mapped
+    if base_column == "HeApatite" and "AGEPRED" in row:
+        return "AGEPRED"
+    return None
 
 
 def _float_value(raw: Any, label: str) -> float:
@@ -1006,6 +1158,19 @@ def normalize_unit_loss(value: float) -> float:
     if not math.isfinite(value):
         return 1.0
     return float(np.clip(value, 0.0, 1.0))
+
+
+def scaled_unit_loss(value: float, scale: float) -> float:
+    """Map a positive raw loss to 0-1 without saturating all large values to 1.
+
+    `value / (value + scale)` keeps the ordering of raw Pecube RMSE values while
+    still bounding the component loss for weighted GA fitness.
+    """
+    value = max(float(value), 0.0)
+    scale = max(float(scale), 1e-12)
+    if not math.isfinite(value):
+        return 1.0
+    return float(value / (value + scale))
 
 
 def weighted_unit_loss(terrain_loss: float, thermo_loss: float, terrain_weight: float, thermo_weight: float) -> float:
@@ -1057,6 +1222,39 @@ def prediction_from_row(row: dict[str, Any]) -> ThermochronologyPrediction:
         pecube_column=str(row["pecube_column"]),
         source_file=str(row["source_file"]),
     )
+
+
+def crop_pixel_border(matrix: np.ndarray | None, border_width: int) -> np.ndarray | None:
+    if matrix is None:
+        return None
+    array = np.asarray(matrix)
+    border_width = int(border_width or 0)
+    if array.ndim != 2 or border_width <= 0:
+        return array.copy()
+    if array.shape[0] <= 2 * border_width or array.shape[1] <= 2 * border_width:
+        return array.copy()
+    return array[border_width:-border_width, border_width:-border_width].copy()
+
+
+def shift_pixel_predictions_for_crop(
+    predictions: list[dict[str, float | str]] | None,
+    border_width: int,
+    shape: tuple[int, int],
+) -> list[dict[str, float | str]]:
+    if not predictions:
+        return []
+    border_width = int(border_width or 0)
+    rows, cols = int(shape[0]), int(shape[1])
+    shifted: list[dict[str, float | str]] = []
+    for item in predictions:
+        x = float(item["x"]) - border_width
+        y = float(item["y"]) - border_width
+        if 0 <= x < cols and 0 <= y < rows:
+            updated = dict(item)
+            updated["x"] = x
+            updated["y"] = y
+            shifted.append(updated)
+    return shifted
 
 
 def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -1232,6 +1430,48 @@ def plot_age_surface_map(
     plt.close(fig)
 
 
+def plot_age_surface_map_pixels(
+    predictions: list[dict[str, float | str]],
+    path: Path,
+    *,
+    terrain: np.ndarray,
+) -> None:
+    fig, ax = plt.subplots(figsize=(7.0, 5.8), constrained_layout=True)
+    terrain_arr = np.asarray(terrain, dtype=float)
+    im = ax.imshow(terrain_arr, cmap="terrain", origin="upper", alpha=0.90)
+    fig.colorbar(im, ax=ax, label="Elevation", fraction=0.045, pad=0.03)
+    sc = ax.scatter(
+        [float(p["x"]) for p in predictions],
+        [float(p["y"]) for p in predictions],
+        c=[float(p["predicted_age"]) for p in predictions],
+        s=58,
+        cmap="viridis",
+        edgecolors="black",
+        linewidths=0.7,
+    )
+    for index, p in enumerate(predictions):
+        dy = -8.0 if index % 2 == 0 else 8.0
+        dx = 6.0
+        ax.annotate(
+            f'{p["sample_id"]}\n{float(p["predicted_age"]):.2g} Ma',
+            xy=(float(p["x"]), float(p["y"])),
+            xytext=(float(p["x"]) + dx, float(p["y"]) + dy),
+            fontsize=7,
+            ha="left",
+            va="center",
+            arrowprops={"arrowstyle": "-", "color": "0.35", "linewidth": 0.7},
+            bbox={"boxstyle": "round,pad=0.18", "facecolor": "white", "edgecolor": "0.8", "alpha": 0.85},
+        )
+    ax.set_xlim(0, terrain_arr.shape[1])
+    ax.set_ylim(terrain_arr.shape[0], 0)
+    ax.set_xlabel("Rotated DEM X pixel")
+    ax.set_ylabel("Rotated DEM Y pixel")
+    ax.set_title("Predicted ages on rotated DEM")
+    fig.colorbar(sc, ax=ax, label="Predicted age (Ma)", fraction=0.045, pad=0.03)
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+
+
 def plot_pecube_loss_history(history: list[dict[str, Any]], path: Path) -> None:
     rows = _numeric_history_rows(history)
     fig, ax = plt.subplots(figsize=(7.0, 4.4), constrained_layout=True)
@@ -1270,23 +1510,26 @@ def plot_pecube_dashboard(
     target_dem: np.ndarray,
     generated_dem: np.ndarray | None,
     uplift: np.ndarray | None,
+    pixel_predictions: list[dict[str, float]] | None,
     path: Path,
 ) -> None:
     fig, axes = plt.subplots(2, 3, figsize=(14, 8), constrained_layout=True)
-    _imshow_panel(axes[0, 0], target_dem, "Target terrain", "terrain")
+    _imshow_panel(axes[0, 0], target_dem, "Target terrain", "terrain", origin="upper")
     if generated_dem is not None:
-        _imshow_panel(axes[0, 1], generated_dem, "Generated terrain", "terrain")
+        _imshow_panel(axes[0, 1], generated_dem, "Generated terrain", "terrain", origin="upper")
     else:
         axes[0, 1].axis("off")
         axes[0, 1].set_title("Generated terrain unavailable")
     if uplift is not None:
-        _imshow_panel(axes[0, 2], uplift, "Best uplift", "RdBu_r")
+        _imshow_panel(axes[0, 2], uplift, "Best uplift", "RdBu_r", origin="upper")
     else:
         axes[0, 2].axis("off")
         axes[0, 2].set_title("Uplift unavailable")
     _draw_age_fit_panel(axes[1, 0], predictions)
     _draw_age_elevation_panel(axes[1, 1], predictions)
     _draw_loss_history_panel(axes[1, 2], history)
+    if pixel_predictions:
+        _overlay_pixel_predictions(axes[0, 1], pixel_predictions)
     fig.suptitle("Pecube-coupled inversion summary", fontsize=14)
     fig.savefig(path, dpi=180)
     plt.close(fig)
@@ -1337,12 +1580,24 @@ def _numeric_history_rows(history: list[dict[str, Any]]) -> list[dict[str, float
     return rows
 
 
-def _imshow_panel(ax: plt.Axes, data: np.ndarray, title: str, cmap: str) -> None:
-    im = ax.imshow(np.asarray(data, dtype=float), cmap=cmap, origin="lower")
+def _imshow_panel(ax: plt.Axes, data: np.ndarray, title: str, cmap: str, origin: str = "lower") -> None:
+    im = ax.imshow(np.asarray(data, dtype=float), cmap=cmap, origin=origin)
     ax.set_title(title)
     ax.set_xticks([])
     ax.set_yticks([])
     ax.figure.colorbar(im, ax=ax, fraction=0.046, pad=0.03)
+
+
+def _overlay_pixel_predictions(ax: plt.Axes, predictions: list[dict[str, float]]) -> None:
+    ax.scatter(
+        [float(p["x"]) for p in predictions],
+        [float(p["y"]) for p in predictions],
+        c=[float(p["predicted_age"]) for p in predictions],
+        cmap="viridis",
+        s=36,
+        edgecolors="black",
+        linewidths=0.6,
+    )
 
 
 def _draw_age_fit_panel(ax: plt.Axes, predictions: list[ThermochronologyPrediction]) -> None:

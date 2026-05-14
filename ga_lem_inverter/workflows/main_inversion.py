@@ -39,7 +39,12 @@ from ga_lem_inverter.pipeline.data import (
     reproject_array_to_profile,
 )
 from ga_lem_inverter.pipeline.preprocessing import interpolate_uplift_cv, unify_array_sizes
-from ga_lem_inverter.pipeline.forward_model import align_model_field, run_fastscape_model, run_fastscape_series
+from ga_lem_inverter.pipeline.forward_model import (
+    align_model_field,
+    boundary_status_from_config,
+    run_fastscape_model,
+    run_fastscape_series,
+)
 from ga_lem_inverter.pipeline.fitness import terrain_similarity
 from ga_lem_inverter.pipeline.optimization import optimize_uplift_ga
 from ga_lem_inverter.pipeline.erosion import create_erosion_field, display_erosion_field, verify_erosion_field
@@ -51,7 +56,8 @@ from ga_lem_inverter.pipeline.visualization import (
     display_array_info,
     display_tiff_info,
     plot_3d_surface,
-    plot_optimization_history
+    plot_optimization_history,
+    flipped_display_array,
 )
 
 
@@ -228,14 +234,12 @@ def create_objective_function(resampled_dem, LOW_RES_SHAPE, ORIGINAL_SHAPE,
             terrain_loss = 1 - similarity  # 最小化不相似度
             if pecube_evaluator is not None and pecube_evaluator.enabled:
                 uplift_series = np.repeat(full_res_uplift[np.newaxis, :, :], len(topography_series), axis=0)
-                temperature_series = np.zeros_like(topography_series, dtype=float)
                 result = pecube_evaluator.evaluate(
                     terrain_loss=terrain_loss,
                     generated_dem=generated_elevation,
                     uplift=full_res_uplift,
                     topography_series=topography_series,
                     uplift_series=uplift_series,
-                    temperature_series=temperature_series,
                 )
                 return result.total_loss
 
@@ -314,6 +318,18 @@ def trim_nan_edges(matrix):
 
     # 裁剪矩阵
     return matrix[row_start:row_end+1, col_start:col_end+1]
+
+
+def crop_output_border(matrix, border_width):
+    """裁掉只用于边界保护的外圈像素；不参与 FastScape 计算本身。"""
+    array = np.asarray(matrix)
+    border_width = int(border_width or 0)
+    if array.ndim != 2 or border_width <= 0:
+        return array.copy()
+    if array.shape[0] <= 2 * border_width or array.shape[1] <= 2 * border_width:
+        return array.copy()
+    return array[border_width:-border_width, border_width:-border_width].copy()
+
 
 def setup_logging(output_path: str) -> None:
     """配置日志系统"""
@@ -636,6 +652,19 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
             logging.info(f"DEM shape: {rotated_dem_data.shape}")
             logging.info(f"Ksp shape: {rotated_Ksp.shape}")
 
+        ksp_border_width = 2
+        safe_border = min(
+            ksp_border_width,
+            max(rotated_Ksp.shape[0] // 2, 0),
+            max(rotated_Ksp.shape[1] // 2, 0),
+        )
+        if safe_border > 0:
+            rotated_Ksp[:safe_border, :] = 0
+            rotated_Ksp[-safe_border:, :] = 0
+            rotated_Ksp[:, :safe_border] = 0
+            rotated_Ksp[:, -safe_border:] = 0
+            logging.info(f"旋转/对齐后已重新补齐 Ksp 零边界，宽度: {safe_border}")
+
         # 保存旋转后的 Ksp
         try:
             rotated_ksp_save_path = arrays_dir / 'rotated_ksp.npy'
@@ -724,7 +753,7 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
         model_params = {
             'Ksp': rotated_Ksp, # 使用 *旋转后* 的 Ksp
             'd_diff': config.getfloat('Model', 'd_diff_value'),
-            'boundary_status': config['Model']['boundary_status'],
+            'boundary_status': boundary_status_from_config(config),
             'area_exp': config.getfloat('Model', 'area_exp'),
             'slope_exp': config.getfloat('Model', 'slope_exp'),
             'time_total': config.getfloat('Model', 'time_total'),
@@ -779,6 +808,8 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
             pecube_time_steps=pecube_time_steps,
         )
 
+        total_time_ma = total_simulation_time / 1_000_000.0
+
         # 显示原始DEM
         plt.figure(figsize=(15, 10))
         plot_single_data(dem_data, "Original DEM", cmap='terrain', origin='upper') # 显示 *原始* DEM
@@ -789,14 +820,14 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
 
         # 显示旋转后的DEM
         plt.figure(figsize=(15, 10))
-        plot_single_data(rotated_dem_data, "Rotated DEM", cmap='terrain', origin='upper') # 显示 *旋转后* DEM
+        plot_single_data(flipped_display_array(rotated_dem_data), "Rotated DEM", cmap='terrain', origin='upper')
         figure_path = context.figure_path('rotated_dem.png')
         plt.savefig(figure_path)
         context.add_artifact(figure_path)
         plt.close()
 
         # 显示侵蚀系数场
-        display_erosion_field(rotated_Ksp, shape=ORIGINAL_SHAPE) #  显示 *旋转后* 的 Ksp
+        display_erosion_field(rotated_Ksp, shape=ORIGINAL_SHAPE, flip_display=True)
         figure_path = context.figure_path('erosion_field.png')
         plt.savefig(figure_path)
         context.add_artifact(figure_path)
@@ -804,8 +835,8 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
 
         #叠加显示DEM和侵蚀系数场
         plt.figure(figsize=(15, 10))
-        plt.imshow(rotated_dem_data, cmap='terrain', origin='upper')
-        plt.imshow(rotated_Ksp, cmap='RdBu_r', alpha=0.5, origin='upper')
+        plt.imshow(flipped_display_array(rotated_dem_data), cmap='terrain', origin='upper')
+        plt.imshow(flipped_display_array(rotated_Ksp), cmap='RdBu_r', alpha=0.5, origin='upper')
         plt.title("Rotated DEM with Erosion Coefficient Field")
         figure_path = context.figure_path('dem_with_erosion_field.png')
         plt.savefig(figure_path)
@@ -816,13 +847,14 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
         # 绘制DEM对比图
         plot_comparison(
             data1=dem_data, #  对比 *原始* DEM
-            data2=rotated_dem_data, # 和 *旋转后* DEM
+            data2=flipped_display_array(rotated_dem_data), # 和 *旋转后* DEM
             title1='Original DEM',
             title2='Rotated DEM',
             value1='Elevation (m)',
             value2='Elevation (m)',
             cmap='terrain',
-            figsize=(15, 10)
+            figsize=(15, 10),
+            origin='upper'
         )
         figure_path = context.figure_path('dem_rotation_comparison.png')
         plt.savefig(figure_path)
@@ -832,13 +864,14 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
         #绘制Ksp对比图
         plot_comparison(
             data1=Ksp, #  对比 *原始* Ksp
-            data2=rotated_Ksp, # 和 *旋转后* Ksp
+            data2=flipped_display_array(rotated_Ksp),
             title1='Original Ksp',
             title2='Rotated Ksp',
             value1='Erosion Coefficient',
             value2='Erosion Coefficient',
             cmap='RdBu_r',
-            figsize=(15, 10)
+            figsize=(15, 10),
+            origin='upper'
         )
         figure_path = context.figure_path('ksp_rotation_comparison.png')
         plt.savefig(figure_path)
@@ -888,13 +921,15 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
         if best_uplift is not None:
             best_low_res_uplift = best_uplift.reshape(LOW_RES_SHAPE)
             best_full_res_uplift = interpolate_uplift_cv(best_low_res_uplift, ORIGINAL_SHAPE)
+            display_low_res_uplift = flipped_display_array(best_low_res_uplift)
+            display_full_res_uplift = flipped_display_array(best_full_res_uplift)
 
             display_array_info("Best Uplift Field", best_full_res_uplift, spacing)
 
             # 绘制隆升率对比图
             plot_comparison(
-                data1=best_low_res_uplift,
-                data2=best_full_res_uplift,
+                data1=display_low_res_uplift,
+                data2=display_full_res_uplift,
                 title1='Best Low Resolution Uplift',
                 title2='Best Full Resolution Uplift',
                 value1='Uplift Rate (mm/yr)',
@@ -915,15 +950,17 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
                 try:
                     true_uplift = np.load(true_uplift_path)
                     if true_uplift.shape == best_full_res_uplift.shape:
+                        true_uplift_cropped = crop_output_border(true_uplift, safe_border)
+                        best_full_res_uplift_for_metrics = crop_output_border(best_full_res_uplift, safe_border)
                         uplift_pearson = pearsonr(
-                            true_uplift.ravel(),
-                            best_full_res_uplift.ravel()
+                            true_uplift_cropped.ravel(),
+                            best_full_res_uplift_for_metrics.ravel()
                         ).statistic
                         uplift_spearman = spearmanr(
-                            true_uplift.ravel(),
-                            best_full_res_uplift.ravel()
+                            true_uplift_cropped.ravel(),
+                            best_full_res_uplift_for_metrics.ravel()
                         ).statistic
-                        uplift_rmse = float(np.sqrt(np.mean((true_uplift - best_full_res_uplift) ** 2)))
+                        uplift_rmse = float(np.sqrt(np.mean((true_uplift_cropped - best_full_res_uplift_for_metrics) ** 2)))
                         demo_metrics.update({
                             'uplift_pearson': float(uplift_pearson),
                             'uplift_spearman': float(uplift_spearman),
@@ -935,8 +972,8 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
                             f"Spearman={uplift_spearman:.4f}, RMSE={uplift_rmse:.4f}"
                         )
                         plot_comparison(
-                            data1=true_uplift,
-                            data2=best_full_res_uplift,
+                            data1=flipped_display_array(true_uplift_cropped),
+                            data2=flipped_display_array(best_full_res_uplift_for_metrics),
                             title1='Demo True Uplift',
                             title2='Inverted Uplift',
                             value1='Uplift Rate (mm/yr)',
@@ -963,22 +1000,38 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
                     x_size=col,
                     y_size=row,
                     spacing=spacing,
-                    boundary_status=config['Model']['boundary_status'],
+                    boundary_status=model_params['boundary_status'],
                     area_exp=config.getfloat('Model', 'area_exp'),
                     slope_exp=config.getfloat('Model', 'slope_exp'),
                     time_total=total_simulation_time
             )
+            final_elevation_cropped = crop_output_border(final_elevation, safe_border)
+            target_dem_cropped = crop_output_border(resampled_dem, safe_border)
+            best_full_res_uplift_cropped = crop_output_border(best_full_res_uplift, safe_border)
+            display_final_elevation = flipped_display_array(final_elevation_cropped)
+            display_target_dem = flipped_display_array(target_dem_cropped)
+            display_full_res_uplift_cropped = flipped_display_array(best_full_res_uplift_cropped)
+            logging.info(
+                "输出/可视化已裁掉 Ksp 零边界: "
+                f"border={safe_border}, raw_shape={final_elevation.shape}, "
+                f"cropped_shape={final_elevation_cropped.shape}"
+            )
 
             # 绘制地形对比图
-            terrain_pearson = pearsonr(resampled_dem.ravel(), final_elevation.ravel()).statistic
-            terrain_spearman = spearmanr(resampled_dem.ravel(), final_elevation.ravel()).statistic
-            terrain_rmse = float(np.sqrt(np.mean((resampled_dem - final_elevation) ** 2)))
+            terrain_pearson = pearsonr(target_dem_cropped.ravel(), final_elevation_cropped.ravel()).statistic
+            terrain_spearman = spearmanr(target_dem_cropped.ravel(), final_elevation_cropped.ravel()).statistic
+            terrain_rmse = float(np.sqrt(np.mean((target_dem_cropped - final_elevation_cropped) ** 2)))
             demo_metrics.update({
                 'terrain_pearson': float(terrain_pearson),
                 'terrain_spearman': float(terrain_spearman),
                 'terrain_rmse': terrain_rmse,
                 'terrain_loss': float(best_fitness) if not pecube_evaluator.enabled else float(pecube_evaluator.best_result.terrain_loss if pecube_evaluator.best_result else best_fitness),
-                'total_loss': float(best_fitness)
+                'total_loss': float(best_fitness),
+                'output_border_crop_pixels': int(safe_border),
+                'raw_output_rows': int(final_elevation.shape[0]),
+                'raw_output_cols': int(final_elevation.shape[1]),
+                'cropped_output_rows': int(final_elevation_cropped.shape[0]),
+                'cropped_output_cols': int(final_elevation_cropped.shape[1]),
             })
             logging.info(
                 "Terrain metrics: "
@@ -994,13 +1047,14 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
             pecube_metrics = pecube_evaluator.save_best_outputs(
                 generated_dem=final_elevation,
                 uplift=best_full_res_uplift,
+                output_border_crop=safe_border,
             )
             demo_metrics.update(pecube_metrics)
             write_metrics(context, "main_metrics.json", {k: float(v) if isinstance(v, (int, float, np.floating)) else v for k, v in demo_metrics.items()})
 
             plot_comparison(
-                data1=final_elevation,
-                data2=resampled_dem, #  注意这里对比的是 *旋转后且重采样* 的 DEM (resampled_dem)
+                data1=display_final_elevation,
+                data2=display_target_dem, #  注意这里对比的是 *旋转后且重采样* 的 DEM (resampled_dem)
                 title1='Generated Terrain',
                 title2='Target Landscape',
                 value1='Elevation (m)',
@@ -1014,8 +1068,8 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
             plt.close()
 
             plot_comparison(
-                data1=final_elevation,
-                data2=resampled_dem,
+                data1=display_final_elevation,
+                data2=display_target_dem,
                 title1='Generated Terrain',
                 title2='Target Landscape',
                 value1='Elevation (m)',
@@ -1029,13 +1083,13 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
             plt.close()
 
             # 绘制隆升分布图
-            plot_uplift_distribution_x(best_full_res_uplift)
+            plot_uplift_distribution_x(display_full_res_uplift_cropped, total_time_ma=total_time_ma)
             figure_path = context.figure_path('uplift_distribution_x.png')
             plt.savefig(figure_path)
             context.add_artifact(figure_path)
             plt.close()
 
-            plot_uplift_distribution_y(best_full_res_uplift)
+            plot_uplift_distribution_y(display_full_res_uplift_cropped, total_time_ma=total_time_ma)
             figure_path = context.figure_path('uplift_distribution_y.png')
             plt.savefig(figure_path)
             context.add_artifact(figure_path)
@@ -1043,9 +1097,9 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
 
             # 绘制3D地形可视化
             fig_3d = plot_3d_surface(
-                data=final_elevation,
-                uplift=best_full_res_uplift,
-                title="3D Terrain with Uplift Field"
+                data=display_final_elevation,
+                uplift=display_full_res_uplift_cropped,
+                title="3D Terrain Surface"
             )
             figure_path = context.figure_path('3d_terrain.png')
             fig_3d.savefig(figure_path)
@@ -1055,8 +1109,11 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
 
             # 保存结果
             results = {
-                    'best_full_res_uplift': best_full_res_uplift,
-                    'final_elevation': final_elevation,
+                    'best_full_res_uplift': best_full_res_uplift_cropped,
+                    'final_elevation': final_elevation_cropped,
+                    'target_dem': target_dem_cropped,
+                    'best_full_res_uplift_raw': best_full_res_uplift,
+                    'final_elevation_raw': final_elevation,
                     'fitness_history': np.array(fitness_history) if fitness_history is not None else None
                 }
             save_optimization_results(arrays_dir, results, context)

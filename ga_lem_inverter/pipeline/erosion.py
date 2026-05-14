@@ -12,6 +12,7 @@ from ga_lem_inverter.pipeline.data import read_shapefile
 from scipy.ndimage import rotate
 from affine import Affine
 from ga_lem_inverter.pipeline.data import rotate_data
+from ga_lem_inverter.pipeline.visualization import flipped_display_array
 
 def clip_and_rasterize(
     line_shp_path: str,
@@ -146,7 +147,8 @@ def create_erosion_field(shape: Tuple[int, int],
 def display_erosion_field(Ksp: np.ndarray,
                          shape: Optional[Tuple[int, int]] = None,
                          title: str = "Erosion Coefficient Field",
-                         cmap: str = 'RdBu_r') -> None:
+                         cmap: str = 'RdBu_r',
+                         flip_display: bool = False) -> None:
     """
     显示侵蚀系数场。
 
@@ -161,7 +163,8 @@ def display_erosion_field(Ksp: np.ndarray,
             Ksp = Ksp.reshape(shape)
 
         plt.figure(figsize=(10, 8), dpi=300)
-        im = plt.imshow(Ksp, cmap=cmap, origin='upper')
+        display_ksp = flipped_display_array(Ksp) if flip_display else Ksp
+        im = plt.imshow(display_ksp, cmap=cmap, origin='upper')
         plt.colorbar(im, label='Erosion Coefficient')
         plt.title(title)
         plt.xlabel('X')

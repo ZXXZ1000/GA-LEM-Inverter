@@ -118,7 +118,7 @@ class MainInversionValidationAcceptanceTests(unittest.TestCase):
         self.assertTrue(np.array_equal(similarity_mock.call_args.kwargs["matrix2"], series[-1]))
         self.assertTrue(np.array_equal(evaluator.call["topography_series"], series))
         self.assertEqual(evaluator.call["uplift_series"].shape, series.shape)
-        self.assertEqual(evaluator.call["temperature_series"].shape, series.shape)
+        self.assertNotIn("temperature_series", evaluator.call)
 
 
 if __name__ == "__main__":

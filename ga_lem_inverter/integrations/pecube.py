@@ -33,6 +33,16 @@ class PecubeEngineConfig:
     sample_observations: Path | None = None
     total_time_myr: float = 1.0
     velocity_km_per_myr: float = 1.0
+    include_uniform_velocity_field: bool = False
+    thickness: float = 35.0
+    nz: int = 21
+    thermal_diffusivity: float = 25.0
+    basal_temperature: float = 700.0
+    sea_level_temperature: float = 15.0
+    lapse_rate: float = 6.5
+    heat_production: float = 0.0
+    erosional_time_scale: float = 0.0
+    save_ptt_paths: bool = False
     lon0: float = 0.0
     lat0: float = 0.0
     dlon: float = 0.01
@@ -122,6 +132,11 @@ class PecubeEngine:
                 return default
             return config.getfloat("Pecube", key)
 
+        def int_value(key: str, default: int) -> int:
+            if "Pecube" not in config or key not in config["Pecube"]:
+                return default
+            return config.getint("Pecube", key)
+
         sample_raw = section.get("sample_observations", "none") if hasattr(section, "get") else "none"
         sample_path: Path | None = None
         if str(sample_raw).strip().lower() not in {"", "none", "null", "skip", "false", "0"}:
@@ -142,6 +157,16 @@ class PecubeEngine:
             sample_observations=sample_path,
             total_time_myr=float_value("total_time_myr", 1.0),
             velocity_km_per_myr=float_value("velocity_km_per_myr", 1.0),
+            include_uniform_velocity_field=bool_value("include_uniform_velocity_field", False),
+            thickness=float_value("thickness", 35.0),
+            nz=int_value("nz", 21),
+            thermal_diffusivity=float_value("thermal_diffusivity", 25.0),
+            basal_temperature=float_value("basal_temperature", 700.0),
+            sea_level_temperature=float_value("sea_level_temperature", 15.0),
+            lapse_rate=float_value("lapse_rate", 6.5),
+            heat_production=float_value("heat_production", 0.0),
+            erosional_time_scale=float_value("erosional_time_scale", 0.0),
+            save_ptt_paths=bool_value("save_ptt_paths", False),
             lon0=float_value("lon0", 0.0),
             lat0=float_value("lat0", 0.0),
             dlon=float_value("dlon", 0.01),
@@ -196,6 +221,16 @@ class PecubeEngine:
                 dataset_name=self.config.dataset_name,
                 total_time_myr=self.config.total_time_myr,
                 velocity_km_per_myr=self.config.velocity_km_per_myr,
+                include_uniform_velocity_field=self.config.include_uniform_velocity_field,
+                thickness=self.config.thickness,
+                nz=self.config.nz,
+                thermal_diffusivity=self.config.thermal_diffusivity,
+                basal_temperature=self.config.basal_temperature,
+                sea_level_temperature=self.config.sea_level_temperature,
+                lapse_rate=self.config.lapse_rate,
+                heat_production=self.config.heat_production,
+                erosional_time_scale=self.config.erosional_time_scale,
+                save_ptt_paths=self.config.save_ptt_paths,
                 lon0=self.config.lon0,
                 lat0=self.config.lat0,
                 dlon=self.config.dlon,
@@ -208,11 +243,7 @@ class PecubeEngine:
             topography_series=topography_series,
             uplift_series=uplift_series,
             temperature_series=temperature_series,
-            # GA-LEM-Inverter uses a simple, documented observation CSV schema
-            # for Python-side loss calculation. Pecube's native data_folder
-            # format is stricter and differs by thermochronology system, so do
-            # not pass our normalized CSV into Pecube.in here.
-            sample_observations=None,
+            sample_observations=observations,
         )
 
         commands: list[PecubeCommandResult] = []

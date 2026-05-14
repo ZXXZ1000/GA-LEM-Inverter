@@ -18,7 +18,7 @@ from sklearn.metrics import mean_squared_error
 from ga_lem_inverter.config import get_bool, get_shape
 from ga_lem_inverter.outputs import RunContext, write_metrics
 from ga_lem_inverter.pipeline.fitness import terrain_similarity
-from ga_lem_inverter.pipeline.forward_model import run_fastscape_model
+from ga_lem_inverter.pipeline.forward_model import boundary_status_from_config, run_fastscape_model
 from ga_lem_inverter.pipeline.optimization import optimize_uplift_ga
 from ga_lem_inverter.pipeline.preprocessing import interpolate_uplift_cv
 from ga_lem_inverter.pipeline.synthetic_erosion import create_synthetic_erosion_field
@@ -62,7 +62,7 @@ def model_params_from_config(config, shape: tuple[int, int]) -> dict[str, Any]:
         "k_sp_base": config_float(config, "Model", "k_sp_value", 6.92e-6),
         "k_sp_fault": config_float(config, "Model", "ksp_fault", 2.0e-5),
         "d_diff": config_float(config, "Model", "d_diff_value", 19.2),
-        "boundary_status": config.get("Model", "boundary_status", fallback="fixed_value"),
+        "boundary_status": boundary_status_from_config(config),
         "area_exp": config_float(config, "Model", "area_exp", 0.43),
         "slope_exp": config_float(config, "Model", "slope_exp", 1.0),
         "time_total": config_float(config, "Model", "time_total", 1.0e5),

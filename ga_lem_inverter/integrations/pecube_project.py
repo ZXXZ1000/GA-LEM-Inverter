@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,7 +34,20 @@ class PecubeProjectConfig:
     lat0: float = 0.0
     total_time_myr: float = 1.0
     velocity_km_per_myr: float = 1.0
+    include_uniform_velocity_field: bool = False
+    thickness: float = 35.0
+    nz: int = 21
+    thermal_diffusivity: float = 25.0
+    basal_temperature: float = 700.0
+    sea_level_temperature: float = 15.0
+    lapse_rate: float = 6.5
+    heat_production: float = 0.0
+    erosional_time_scale: float = 0.0
+    save_ptt_paths: bool = False
     age_ahe: bool = True
+    age_zhe: bool = True
+    age_aft: bool = True
+    age_zft: bool = True
     echo_input_file: bool = True
 
 
@@ -65,7 +79,7 @@ class PecubeProjectBuilder:
                 raise ValueError(f"Pecube 序列数组形状必须一致，期望 {shape}，得到 {array.shape}。")
 
         if temperature_series is None:
-            temperatures = [np.zeros(shape, dtype=float) for _ in topographies]
+            temperatures = [surface_temperature_from_topography(array, self.config) for array in topographies]
         else:
             temperatures = [self._as_2d_array(array, "temperature") for array in temperature_series]
             if len(temperatures) != len(topographies):
@@ -94,7 +108,8 @@ class PecubeProjectBuilder:
         if has_observations:
             samples_dir = data_dir / "observations"
             samples_dir.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(sample_observations, samples_dir / Path(sample_observations).name)
+            native_observation_path = samples_dir / "observations.csv"
+            self._write_native_observation_file(Path(sample_observations), native_observation_path)
 
         input_file = input_dir / "Pecube.in"
         input_file.write_text(
@@ -116,6 +131,77 @@ class PecubeProjectBuilder:
         values = np.flipud(np.asarray(array, dtype=float)).ravel()
         np.savetxt(path, values, fmt="%.8f")
 
+    @staticmethod
+    def _write_native_observation_file(source_path: Path, target_path: Path) -> None:
+        grouped: dict[str, dict[str, str | float]] = {}
+        with source_path.open("r", encoding="utf-8-sig", newline="") as handle:
+            reader = csv.DictReader(handle)
+            if reader.fieldnames is None:
+                raise ValueError(f"观测样品 CSV 没有表头: {source_path}")
+            for row in reader:
+                sample_id = str(row.get("sample_id", "")).strip()
+                if not sample_id:
+                    continue
+                lon_raw = row.get("lon") or row.get("longitude") or row.get("x")
+                lat_raw = row.get("lat") or row.get("latitude") or row.get("y")
+                if lon_raw in {None, ""} or lat_raw in {None, ""}:
+                    raise ValueError(f"样品 {sample_id} 缺少 lon/lat，无法转换为 Pecube 原生观测文件。")
+                system = str(row.get("system", "")).strip().lower().replace("-", "").replace("_", "")
+                observed_age = str(row.get("observed_age", "")).strip()
+                sigma = str(row.get("sigma", "")).strip()
+                sample = grouped.setdefault(
+                    sample_id,
+                    {
+                        "SAMPLE": sample_id,
+                        "LON": float(lon_raw),
+                        "LAT": float(lat_raw),
+                        "HEIGHT": float(str(row.get("elevation", "0")).strip() or "0"),
+                    },
+                )
+                mapping = {
+                    "ahe": ("AHE", "DAHE"),
+                    "heapatite": ("AHE", "DAHE"),
+                    "apatitehe": ("AHE", "DAHE"),
+                    "zhe": ("ZHE", "DZHE"),
+                    "hezircon": ("ZHE", "DZHE"),
+                    "zirconhe": ("ZHE", "DZHE"),
+                    "aft": ("AFT", "DAFT"),
+                    "ftapatite": ("AFT", "DAFT"),
+                    "apatiteft": ("AFT", "DAFT"),
+                    "zft": ("ZFT", "DZFT"),
+                    "ftzircon": ("ZFT", "DZFT"),
+                    "zirconft": ("ZFT", "DZFT"),
+                }
+                columns = mapping.get(system)
+                if columns is None:
+                    continue
+                value_column, sigma_column = columns
+                sample[value_column] = float(observed_age)
+                sample[sigma_column] = float(sigma)
+
+        if not grouped:
+            raise ValueError(f"观测样品 CSV 没有可写入 Pecube 的样品行: {source_path}")
+
+        fieldnames = [
+            "SAMPLE",
+            "LON",
+            "LAT",
+            "HEIGHT",
+            "AHE",
+            "DAHE",
+            "AFT",
+            "DAFT",
+            "ZHE",
+            "DZHE",
+            "ZFT",
+            "DZFT",
+        ]
+        with target_path.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            for sample_id in sorted(grouped):
+                writer.writerow(grouped[sample_id])
+
     def _render_input(self, *, shape: tuple[int, int], ntime: int, has_observations: bool) -> str:
         rows, cols = shape
         nx = self.config.nx or cols
@@ -135,6 +221,14 @@ class PecubeProjectBuilder:
             f"lat0 = {self.config.lat0}",
             f"dlon = {self.config.dlon}",
             f"dlat = {self.config.dlat}",
+            f"thickness = {self.config.thickness}",
+            f"nz = {int(self.config.nz)}",
+            f"thermal_diffusivity = {self.config.thermal_diffusivity}",
+            f"basal_temperature = {self.config.basal_temperature}",
+            f"sea_level_temperature = {self.config.sea_level_temperature}",
+            f"lapse_rate = {self.config.lapse_rate}",
+            f"heat_production = {self.config.heat_production}",
+            f"erosional_time_scale = {self.config.erosional_time_scale}",
             f"topo_file_name = {self.config.dataset_name}/",
             f"ntime = {ntime}",
         ]
@@ -144,17 +238,35 @@ class PecubeProjectBuilder:
             time_value = total_time - index * step
             lines.extend([
                 f"time_topo{index + 1} = {time_value:.6f}",
-                f"output{index + 1} = 0",
+                f"output{index + 1} = 1",
             ])
+        if self.config.include_uniform_velocity_field:
+            lines.extend([
+                "nfault = 1",
+                "npoint1 = -1",
+                "nstep1 = 1",
+                f"time_start1_1 = {total_time:.6f}",
+                "time_end1_1 = 0",
+                f"velo1_1 = {self.config.velocity_km_per_myr:.6f}",
+            ])
+        else:
+            lines.append("nfault = 0")
         lines.extend([
-            "nfault = 1",
-            "npoint1 = -1",
-            "nstep1 = 1",
-            f"time_start1_1 = {total_time:.6f}",
-            "time_end1_1 = 0",
-            f"velo1_1 = {self.config.velocity_km_per_myr:.6f}",
             f"age_AHe_flag = {1 if self.config.age_ahe else 0}",
-            "save_PTT_paths = 0",
+            f"age_ZHe_flag = {1 if self.config.age_zhe else 0}",
+            f"age_AFT_flag = {1 if self.config.age_aft else 0}",
+            f"age_ZFT_flag = {1 if self.config.age_zft else 0}",
+            f"save_PTT_paths = {1 if self.config.save_ptt_paths else 0}",
             "",
         ])
         return "\n".join(lines)
+
+
+def surface_temperature_from_topography(topography: np.ndarray, config: PecubeProjectConfig) -> np.ndarray:
+    """Build Pecube surface-temperature grids from topography.
+
+    Pecube interprets topography in meters, converts it to km internally, and
+    uses a positive lapse rate as colder temperature at higher elevation.
+    """
+    topo_km = np.asarray(topography, dtype=float) / 1000.0
+    return float(config.sea_level_temperature) - float(config.lapse_rate) * topo_km

@@ -5,9 +5,12 @@
 """
 
 import importlib.metadata as md
+import os
 import shutil
+import subprocess
 import sys
 import warnings
+from pathlib import Path
 
 
 VERSION_CHECKS = {
@@ -18,7 +21,72 @@ VERSION_CHECKS = {
 }
 
 
-def test_imports():
+ISOLATED_IMPORTS = {"sko"}
+
+
+def import_package(import_name: str) -> tuple[bool, str]:
+    """Import a package for environment validation.
+
+    scikit-opt imports `sko.tools`, which calls multiprocessing.set_start_method
+    at import time. Under pytest, another plugin may already have set the
+    multiprocessing context, so validate it in a fresh Python process.
+    """
+    if import_name in ISOLATED_IMPORTS:
+        result = subprocess.run(
+            [sys.executable, "-c", f"import {import_name}"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if result.returncode == 0:
+            return True, ""
+        message = (result.stderr or result.stdout).strip()
+        return False, message or f"subprocess import failed with exit code {result.returncode}"
+
+    try:
+        __import__(import_name)
+        return True, ""
+    except Exception as exc:
+        return False, str(exc)
+
+
+def find_environment_tool(tool: str) -> str | None:
+    """Find a tool in PATH or beside the current conda Python executable."""
+    path = shutil.which(tool)
+    if path:
+        return path
+
+    env_prefix = Path(sys.prefix).resolve()
+    search_dirs = [
+        Path(sys.executable).resolve().parent,
+        env_prefix / "bin",
+        env_prefix / "Scripts",
+        env_prefix / "Library" / "mingw-w64" / "bin",
+        env_prefix / "Library" / "usr" / "bin",
+        env_prefix / "Library" / "bin",
+    ]
+    names = [tool]
+    if tool == "make":
+        names.append("mingw32-make")
+    if os.name == "nt":
+        names.extend([f"{name}.exe" for name in list(names)])
+        names.extend([f"{name}.cmd" for name in list(names)])
+        names.extend([f"{name}.bat" for name in list(names)])
+
+    seen = set()
+    for directory in search_dirs:
+        for name in names:
+            candidate = directory / name
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            if candidate.exists() and candidate.is_file():
+                return str(candidate)
+    return None
+
+
+def check_environment() -> bool:
     """测试所有关键包的导入"""
     packages = {
         'numpy': 'numpy',
@@ -60,8 +128,8 @@ def test_imports():
     print("=" * 50)
     
     for import_name, package_name in packages.items():
-        try:
-            module = __import__(import_name)
+        ok, error = import_package(import_name)
+        if ok:
             version_text = ""
             try:
                 version_text = f"=={md.version(package_name)}"
@@ -69,8 +137,8 @@ def test_imports():
                 pass
             print(f"✓ {package_name}{version_text}")
             success_count += 1
-        except ImportError as e:
-            print(f"✗ {package_name}: {e}")
+        else:
+            print(f"✗ {package_name}: {error}")
     
     compatibility_ok = True
     for package_name, expected_version in VERSION_CHECKS.items():
@@ -112,7 +180,7 @@ def test_imports():
 
     tool_ok = True
     for tool in ("make", "gfortran"):
-        path = shutil.which(tool)
+        path = find_environment_tool(tool)
         if path:
             print(f"✓ {tool}: {path}")
         else:
@@ -129,5 +197,10 @@ def test_imports():
         print("部分包导入失败或关键版本不兼容，请检查安装。")
         return False
 
+
+def test_imports():
+    assert check_environment()
+
+
 if __name__ == "__main__":
-    sys.exit(0 if test_imports() else 1)
+    sys.exit(0 if check_environment() else 1)

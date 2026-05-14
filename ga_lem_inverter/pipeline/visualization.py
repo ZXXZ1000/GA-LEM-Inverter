@@ -7,6 +7,8 @@ from mpl_toolkits.mplot3d import Axes3D
 from scipy.interpolate import griddata
 import logging
 from typing import Tuple, Optional, List, Dict
+from rasterio.transform import Affine
+from shapely.ops import transform as shapely_transform
 
 def setup_plot_style():
     """设置全局绘图样式"""
@@ -18,7 +20,8 @@ def setup_plot_style():
 def plot_comparison(data1: np.ndarray, data2: np.ndarray,
                    title1: str, title2: str, value1: str, value2: str,
                    cmap: str = 'viridis', figsize: Tuple[int, int] = (15, 10),
-                   dpi: int = 300, shared_scale: bool = True) -> plt.Figure:
+                   dpi: int = 300, shared_scale: bool = True,
+                   origin: str = 'upper') -> plt.Figure:
     """绘制两个数据集的对比图"""
     setup_plot_style()
 
@@ -31,7 +34,7 @@ def plot_comparison(data1: np.ndarray, data2: np.ndarray,
         vmin1, vmax1 = np.nanmin(data1), np.nanmax(data1)
         vmin2, vmax2 = np.nanmin(data2), np.nanmax(data2)
 
-    im1 = ax1.imshow(data1, cmap=cmap, origin='upper', vmin=vmin1, vmax=vmax1)
+    im1 = ax1.imshow(data1, cmap=cmap, origin=origin, vmin=vmin1, vmax=vmax1)
     ax1.set_title(title1, fontsize=16, weight='bold', fontstyle='italic')
     ax1.set_xlabel('X', fontsize=14, weight='bold', fontstyle='italic')
     ax1.set_ylabel('Y', fontsize=14, weight='bold', fontstyle='italic')
@@ -42,7 +45,7 @@ def plot_comparison(data1: np.ndarray, data2: np.ndarray,
     cbar1.set_label(value1, fontsize=14, weight='bold', fontstyle='italic', labelpad=10)
 
     # 绘制第二个数据集
-    im2 = ax2.imshow(data2, cmap=cmap, origin='upper', vmin=vmin2, vmax=vmax2)
+    im2 = ax2.imshow(data2, cmap=cmap, origin=origin, vmin=vmin2, vmax=vmax2)
     ax2.set_title(title2, fontsize=16, weight='bold', fontstyle='italic')
     ax2.set_xlabel('X', fontsize=14, weight='bold', fontstyle='italic')
     ax2.set_ylabel('Y', fontsize=14, weight='bold', fontstyle='italic')
@@ -55,7 +58,7 @@ def plot_comparison(data1: np.ndarray, data2: np.ndarray,
     plt.tight_layout()
     return fig
 
-def plot_uplift_distribution(uplift_data: np.ndarray) -> plt.Figure:
+def plot_uplift_distribution(uplift_data: np.ndarray, axis_label: str = 'X Coordinate', total_time_ma: float = 10.0) -> plt.Figure:
     """绘制隆升率分布图"""
     setup_plot_style()
 
@@ -73,19 +76,19 @@ def plot_uplift_distribution(uplift_data: np.ndarray) -> plt.Figure:
     ax1.fill_between(x_coords, mean_uplift - std_uplift, mean_uplift + std_uplift,
                      color='gray', alpha=0.2, label='Standard Deviation Range')
 
-    ax1.set_xlabel('Y Coordinate', fontsize=14, weight='bold', fontstyle='italic')
+    ax1.set_xlabel(axis_label, fontsize=14, weight='bold', fontstyle='italic')
     ax1.set_ylabel('Uplift Rate (mm/yr)', fontsize=14, weight='bold',
                    fontstyle='italic', color='#B32626')
-    ax1.set_title('Uplift Rate Distribution and 10Ma Total Uplift',
+    ax1.set_title(f'Uplift Rate Distribution and {total_time_ma:g} Ma Total Uplift',
                   fontsize=16, weight='bold', fontstyle='italic')
     ax1.grid(True, linestyle='--', alpha=0.7)
     ax1.tick_params(axis='y', labelcolor='#B32626')
 
     ax2 = ax1.twinx()
-    total_uplift_10ma = mean_uplift * 10
-    ax2.plot(x_coords, total_uplift_10ma, color='#1E88E5',
-             linestyle='--', label='10Ma Total Uplift')
-    ax2.set_ylabel('10Ma Total Uplift (km)', fontsize=14, weight='bold',
+    total_uplift_km = mean_uplift * total_time_ma
+    ax2.plot(x_coords, total_uplift_km, color='#1E88E5',
+             linestyle='--', label=f'{total_time_ma:g} Ma Total Uplift')
+    ax2.set_ylabel(f'{total_time_ma:g} Ma Total Uplift (km)', fontsize=14, weight='bold',
                    fontstyle='italic', color='#1E88E5')
 
     lines1, labels1 = ax1.get_legend_handles_labels()
@@ -94,11 +97,11 @@ def plot_uplift_distribution(uplift_data: np.ndarray) -> plt.Figure:
 
     return fig
 
-def plot_uplift_distribution_x(uplift_data: np.ndarray) -> plt.Figure:
+def plot_uplift_distribution_x(uplift_data: np.ndarray, total_time_ma: float = 10.0) -> plt.Figure:
     """绘制沿X轴的隆升率分布图"""
-    return plot_uplift_distribution(uplift_data)
+    return plot_uplift_distribution(uplift_data, axis_label='X Coordinate', total_time_ma=total_time_ma)
 
-def plot_uplift_distribution_y(uplift_data: np.ndarray) -> plt.Figure:
+def plot_uplift_distribution_y(uplift_data: np.ndarray, total_time_ma: float = 10.0) -> plt.Figure:
     """绘制沿Y轴的隆升率分布图"""
     setup_plot_style()
 
@@ -119,16 +122,16 @@ def plot_uplift_distribution_y(uplift_data: np.ndarray) -> plt.Figure:
     ax1.set_xlabel('Y Coordinate', fontsize=14, weight='bold', fontstyle='italic')
     ax1.set_ylabel('Uplift Rate (mm/yr)', fontsize=14, weight='bold',
                     fontstyle='italic', color='#B32626')
-    ax1.set_title('Uplift Rate Distribution and 10Ma Total Uplift',
+    ax1.set_title(f'Uplift Rate Distribution and {total_time_ma:g} Ma Total Uplift',
                     fontsize=16, weight='bold', fontstyle='italic')
     ax1.grid(True, linestyle='--', alpha=0.7)
     ax1.tick_params(axis='y', labelcolor='#B32626')
 
     ax2 = ax1.twinx()
-    total_uplift_10ma = mean_uplift * 10
-    ax2.plot(y_coords, total_uplift_10ma, color='#1E88E5',
-                linestyle='--', label='10Ma Total Uplift')
-    ax2.set_ylabel('10Ma Total Uplift (km)', fontsize=14, weight='bold',
+    total_uplift_km = mean_uplift * total_time_ma
+    ax2.plot(y_coords, total_uplift_km, color='#1E88E5',
+                linestyle='--', label=f'{total_time_ma:g} Ma Total Uplift')
+    ax2.set_ylabel(f'{total_time_ma:g} Ma Total Uplift (km)', fontsize=14, weight='bold',
                     fontstyle='italic', color='#1E88E5')
 
     lines1, labels1 = ax1.get_legend_handles_labels()
@@ -196,9 +199,48 @@ def plot_3d_surface(data: np.ndarray, uplift: np.ndarray,
     contour = ax.contour(X, Y, smooth_uplift, levels, cmap='RdBu_r')
 
     ax.set_title(title, fontsize=16, weight='bold', fontstyle='italic')
+    ax.view_init(elev=28, azim=-58)
+    try:
+        ax.set_box_aspect((smooth_data.shape[1], smooth_data.shape[0], max(np.nanptp(smooth_data), 1.0) / 30.0))
+    except Exception:
+        pass
     fig.colorbar(surf, ax=ax, shrink=0.5, aspect=5, label='Elevation (m)')
+    fig.subplots_adjust(left=0.02, right=0.92, bottom=0.02, top=0.92)
 
     return fig
+
+
+def flipped_display_array(data: np.ndarray) -> np.ndarray:
+    """Use the validated rotated-DEM display convention from demo2/demo3 alignment checks."""
+    return np.fliplr(np.flipud(np.asarray(data)))
+
+
+def map_geometries_to_pixel_space(
+    gdf,
+    affine_transform,
+    *,
+    height: int,
+    width: int,
+    flip_vertical: bool = False,
+    flip_horizontal: bool = False,
+):
+    inverse = ~affine_transform
+
+    def project_geometry(geom):
+        def project_xy(x, y, z=None):
+            col, row = inverse * (x, y)
+            if flip_vertical:
+                row = height - row
+            if flip_horizontal:
+                col = width - col
+            return col, row
+
+        return shapely_transform(project_xy, geom)
+
+    pixel_gdf = gdf.copy()
+    pixel_gdf["geometry"] = pixel_gdf.geometry.apply(project_geometry)
+    pixel_gdf = pixel_gdf.set_crs(None, allow_override=True)
+    return pixel_gdf
 
 def plot_optimization_history(fitness_history: List[float], save_path: Optional[str] = None) -> plt.Figure:
     """
