@@ -5,6 +5,7 @@ from pathlib import Path
 
 import numpy as np
 
+from ga_lem_inverter.integrations.pecube import PecubeEngine
 from ga_lem_inverter.integrations.pecube_fitness import (
     ThermochronologyObservation,
     predictions_from_parsed,
@@ -145,6 +146,7 @@ class PecubeSchemaAcceptanceTests(unittest.TestCase):
         self.assertIn("thermal_diffusivity = 25.0", input_text)
         self.assertIn("sea_level_temperature = 15.0", input_text)
         self.assertIn("lapse_rate = 6.5", input_text)
+        self.assertIn("nskip = 4", input_text)
         self.assertIn("nfault = 0", input_text)
         self.assertNotIn("npoint1 = -1", input_text)
         self.assertEqual([path.name for path in topo_files], ["topo0", "topo1", "topo2", "topo3", "topo4"])
@@ -171,6 +173,53 @@ class PecubeSchemaAcceptanceTests(unittest.TestCase):
         self.assertIn("nfault = 1", input_text)
         self.assertIn("npoint1 = -1", input_text)
         self.assertIn("velo1_1 = 0.800000", input_text)
+
+    def test_project_builder_accepts_configured_nskip(self):
+        """产品验收：Pecube nskip 必须可配置，用于降低优化搜索的磁盘和计算开销。"""
+        topographies = [np.zeros((4, 4), dtype=float), np.ones((4, 4), dtype=float)]
+        uplifts = [np.ones((4, 4), dtype=float), np.ones((4, 4), dtype=float)]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            builder = PecubeProjectBuilder(PecubeProjectConfig(nskip=3))
+            project = builder.build(
+                project_dir=Path(tmpdir) / "PGB01",
+                topography_series=topographies,
+                uplift_series=uplifts,
+            )
+            input_text = project.input_file.read_text(encoding="utf-8")
+
+        self.assertIn("nskip = 3", input_text)
+
+    def test_pecube_engine_reads_nskip_from_config(self):
+        """产品验收：用户在 config.ini 的 [Pecube] nskip 必须进入 PecubeEngine。"""
+        import configparser
+
+        config = configparser.ConfigParser()
+        config["Run"] = {"mode": "pecube_coupled"}
+        config["Pecube"] = {
+            "enabled": "false",
+            "nskip": "5",
+            "run_vtk": "false",
+        }
+
+        engine = PecubeEngine.from_config(config)
+
+        self.assertEqual(engine.config.nskip, 5)
+        self.assertFalse(engine.config.run_vtk)
+
+    def test_pecube_engine_uses_low_output_defaults(self):
+        """产品验收：默认 Pecube 优化搜索不运行 Test/Vtk，且使用 nskip=4。"""
+        import configparser
+
+        config = configparser.ConfigParser()
+        config["Run"] = {"mode": "pecube_coupled"}
+        config["Pecube"] = {"enabled": "false"}
+
+        engine = PecubeEngine.from_config(config)
+
+        self.assertFalse(engine.config.run_test)
+        self.assertFalse(engine.config.run_vtk)
+        self.assertEqual(engine.config.nskip, 4)
 
     def test_surface_temperature_uses_positive_lapse_rate_with_elevation(self):
         """产品验收：未显式提供 temp* 时，Pecube 地表温度必须随地形升高而降低。"""

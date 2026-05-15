@@ -85,8 +85,13 @@ mode = main
 - `[Data] study_area_shp_path`：研究区 Shapefile，可填 `none` 跳过。
 - `[Optimization] scale_factor`：隆升场降维因子，也就是 K。
 - `[Optimization] population_size`、`max_iterations`：GA 搜索规模。
+- `[Optimization] search_strategy`：默认 `staged`，按 `coarse -> refine -> verify` 多阶段搜索；`single` 只保留给调试和极快 smoke。
+- `[Optimization] enable_fitness_cache`：默认 `true`，重复候选解会复用已有 fitness，避免重复运行 FastScape + Pecube。
 - `[Optimization] uplift_min` / `uplift_max` / `uplift_precision`：隆升率搜索范围和步长，单位 `mm/yr`。程序内部用整数编码搜索，例如 `0.1..1.0 mm/yr` 配合 `0.1` 步长会变成 `1..10`，进入 FastScape 和输出图件前自动还原为真实隆升率；FastScape 内部会再统一换算成 `m/yr`。
 - `[Optimization] n_jobs`：并行任务数；`-1` 使用全部 CPU 核心。Pecube 约束启用时，每个候选解会写入独立 `pecube/evaluations/eval_*` 目录，可以和 FastScape 一起并行。
+- `[Optimization] diversity_*`：控制停滞后的多样性注入，用于跳出局部最优；默认混合随机个体、当前最优扰动和地形 prior。
+- `[Optimization] mutation_*`：控制自适应变异率；停滞时可临时增加变异，但不会超过配置上限。
+- `[OptimizationStage1/2/3]`：staged 搜索的每阶段参数。后一阶段会继承前一阶段最优解，并继续围绕它搜索。
 - `[Model] boundary_left/right/top/bottom`：FastScape 四边边界，顺序为 `left,right,top,bottom`。`fixed_value` 表示闭合/固定边界，`core` 表示开放出水口，`looped` 表示周期边界；四项都填写时会覆盖单值 `boundary_status`。demo3 默认 `bottom = core`，其余边闭合。
 - `[Pecube] enabled`：默认 `auto`；配置了 `sample_observations` 时，`main` 模式会把 Pecube 热年代学 loss 接进 GA fitness。
 - `[Pecube] sample_observations`：热年代学样品 CSV；设为 `none` 即关闭 Pecube 约束。用户侧 schema 固定为“一行一个样品-体系观测”，程序会自动转换成 Pecube 原生 A-file。
@@ -94,11 +99,64 @@ mode = main
 - `[Pecube] observation_coordinate_system`：默认 `geographic`，样品 CSV 使用真实 `lon,lat`；也可用 `projected/dem_crs` 输入 DEM 投影坐标，或用 `grid_index` 输入 DEM 行列索引。
 - `[Pecube] sea_level_temperature` / `lapse_rate`：自动生成 `temp0,temp1...` 地表温度场，公式为 `surface_temp = sea_level_temperature - lapse_rate * topography_km`。`lapse_rate` 用正数表示海拔越高越冷。
 - `[Pecube] thickness` / `basal_temperature` / `thermal_diffusivity`：Pecube 热模型参数，会写入每次候选解的 `Pecube.in`。
+- `[Pecube] nskip`：Pecube 读取地形网格的水平抽样步长。默认 `4`，优化搜索时显著减少中间数据和磁盘占用；最终高精度单次验证可调回 `1` 或 `2`。
+- `[Pecube] run_vtk`：默认 `false`，不生成 `.vtk` 三维体数据。GA 搜索会运行大量候选解，开启 VTK 很容易产生几十 GB 输出；只有需要 ParaView 后处理时才建议临时开启。
+- `[Pecube] run_test`：默认 `false`，优化搜索时不运行 Pecube 的 `Test` 检查程序，避免每个候选解额外写出 VTK 检查文件；调试 `Pecube.in` 时可临时改成 `true`。
 - `[Pecube] include_uniform_velocity_field`：默认 `false`。Pecube 本身可叠加一个全域速度场，但主优化已经把 GA/FastScape 的 uplift 网格写入 `uplift0,uplift1...`，默认关闭额外速度场，避免重复剥露导致预测年龄系统性偏年轻。
 - `[Fitness] terrain_loss_weight` / `thermo_loss_weight`：组合目标函数权重。
 - `[Fitness] thermo_loss_scale`：把热年代学原始 normalized RMSE 映射到 0-1 的尺度，使用平滑有界函数保留候选之间的差异。
 
 正式实验建议先用 demo 跑通，再逐步替换 DEM 和调大 GA 参数。
+
+## GA 优化策略
+
+默认主优化使用 `staged` 多阶段 GA，而不是单阶段无脑搜索。原因是一次 fitness 评价会串联：
+
+```text
+uplift field
+  -> FastScape forward model
+  -> Pecube thermochronology prediction
+  -> terrain loss + thermo loss
+```
+
+这个目标函数计算贵、维度高，并且地形约束和热年代学约束可能竞争。默认三阶段含义是：
+
+- `coarse`：高变异、较强探索，先找到可行区域。
+- `refine`：继承 coarse 最优解，降低变异，在较好区域内精修。
+- `verify`：保留前阶段最优，使用较低变异检查稳定性。
+
+如果只想调试代码链路，可在 `[Optimization]` 中设：
+
+```ini
+search_strategy = single
+```
+
+但正式 demo3 反演建议保留：
+
+```ini
+search_strategy = staged
+enable_fitness_cache = true
+n_jobs = -1
+```
+
+每次主优化会额外输出 GA 诊断文件：
+
+```text
+tables/ga_history.csv
+metrics/ga_metrics.json
+metrics/stage_metrics.json
+```
+
+其中 `ga_history.csv` 记录每代 best/mean/std fitness、unique chromosome 数量、cache hit/miss、mutation probability 和 diversity injection。`ga_metrics.json` 汇总本次 GA 搜索策略、best stage、cache 命中率和注入次数。`stage_metrics.json` 分阶段记录每个 stage 的参数和 best fitness。
+
+demo3 已提供两个 staged 配置：
+
+```bash
+python runner.py --config demo/configs/demo3_staged_smoke.ini
+python runner.py --config demo/configs/demo3_staged_medium_smoke.ini
+```
+
+`demo3_staged_smoke.ini` 用于快速验收链路；`demo3_staged_medium_smoke.ini` 用于代码和单元测试完成后的中等长度验收，目标运行时间控制在 2-3 小时。
 
 ## Pecube 耦合
 
@@ -117,6 +175,18 @@ surface_temp = sea_level_temperature - lapse_rate * topography_km
 因此高海拔区域会进入更冷的地表边界条件，地形历史和热模型会共同影响预测热年代学年龄。若通过 Python API 显式传入 `temperature_series`，则会覆盖这个自动生成结果。
 
 Pecube 的 `uplift0,uplift1...` 已经承接 GA 当前候选解的隆升场，单位 `km/Myr`。由于 `1 mm/yr = 1 km/Myr`，主优化传入的 `0.5..1.5 mm/yr` 可直接作为 Pecube uplift 网格。默认不会再写 Pecube 的 `npoint=-1` 全域速度场；只有显式设置 `include_uniform_velocity_field = true` 时才会叠加 `velocity_km_per_myr`。
+
+为了避免优化搜索输出过大，默认 Pecube 配置采用轻量输出：
+
+```ini
+[Pecube]
+run_test = false
+run_vtk = false
+nskip = 4
+save_ptt_paths = false
+```
+
+`run_test = false` 表示优化搜索时不执行 Pecube 的 `Test` 检查程序，因为它也可能写出 VTK 检查文件。`run_vtk = false` 表示不执行 Pecube 的 VTK 后处理程序，因此不会为每个候选解生成 `.vtk` 三维体数据。`nskip = 4` 表示 Pecube 每 4 个 DEM/topo 格点采样一次，用较低水平分辨率计算热年代学预测。正式最终解如果需要更高精度，可以把 `nskip` 调成 `1` 或 `2`，并只在单次后处理时临时打开 `run_test = true` 或 `run_vtk = true`。
 
 尚未实现的是“时间变化 uplift history”作为优化变量，即 `time x y x` 的隆升历史。原因在于当前使用的 FastScape/xarray-simlab `basic_model` 接口只声明 `uplift__rate` 支持标量或二维 `(y, x)` 场，不支持一次正演中直接输入带时间维的 uplift forcing。不能把一次 FastScape 正演硬拆成多个彼此独立的小正演来伪造 uplift history，因为那会丢掉连续地形状态。后续若要支持时间变化 uplift，需要先实现可靠的 FastScape 连续状态继承，或改用/扩展支持 time-varying uplift forcing 的 FastScape 接口。
 

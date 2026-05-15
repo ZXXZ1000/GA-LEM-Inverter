@@ -1,8 +1,12 @@
 import unittest
+import csv
+import json
+import tempfile
+from pathlib import Path
 
 import numpy as np
 
-from ga_lem_inverter.pipeline.optimization import MyGA, optimize_uplift_ga
+from ga_lem_inverter.pipeline.optimization import MyGA, optimize_uplift_ga, _allocate_counts
 
 
 class MyGATests(unittest.TestCase):
@@ -65,6 +69,7 @@ class MyGATests(unittest.TestCase):
             ga_params={
                 "pop": 6,
                 "max_iter": 1,
+                "search_strategy": "single",
                 "prob_cross": 0.0,
                 "prob_mut": 0.0,
                 "lb": 0.0,
@@ -257,6 +262,238 @@ class MyGATests(unittest.TestCase):
         self.assertEqual(history, [0.2])
         self.assertTrue(np.all(np.isfinite(ga.Y)))
         self.assertIn(1.0, ga.Y)
+
+    def test_fitness_cache_reuses_duplicate_chromosomes(self):
+        """重复染色体应只评价一次，其余从 fitness cache 读取。"""
+        calls = {"count": 0}
+
+        def objective(x):
+            calls["count"] += 1
+            return float(np.sum(x) / 100.0)
+
+        ga = MyGA(
+            func=objective,
+            n_dim=4,
+            size_pop=4,
+            max_iter=1,
+            prob_mut=0,
+            lb=0,
+            ub=10,
+            n_jobs=1,
+            enable_fitness_cache=True,
+        )
+        ga.Chrom = np.array(
+            [
+                [1, 1, 1, 1],
+                [1, 1, 1, 1],
+                [2, 2, 2, 2],
+                [2, 2, 2, 2],
+            ],
+            dtype=int,
+        )
+        ga.low_res_shape = (2, 2)
+        ga.selection = lambda: None
+        ga.crossover = lambda: None
+        ga.mutation = lambda: None
+        ga.reduce_population_size = lambda: None
+
+        ga.run(max_iter=1, patience=10)
+
+        self.assertEqual(calls["count"], 2)
+        self.assertEqual(ga.cache_hits, 2)
+        self.assertEqual(ga.cache_misses, 2)
+        self.assertEqual(len(ga.fitness_cache), 2)
+
+    def test_fitness_cache_does_not_change_fixed_seed_result(self):
+        """cache 只能减少重复评价，不能改变固定 seed 下的最优结果。"""
+        params = {
+            "pop": 6,
+            "max_iter": 2,
+            "search_strategy": "single",
+            "prob_cross": 0.0,
+            "prob_mut": 0.0,
+            "lb": 0.0,
+            "ub": 0.5,
+            "uplift_precision": 0.1,
+            "decay_rate": 1.0,
+            "min_size_pop": 6,
+            "patience": 10,
+            "random_seed": 11,
+        }
+
+        def objective(uplift_vector):
+            uplift_vector = np.asarray(uplift_vector, dtype=float)
+            return float(np.mean((uplift_vector - 0.3) ** 2))
+
+        result_without_cache = optimize_uplift_ga(
+            obj_func=objective,
+            resampled_dem=np.arange(9, dtype=float).reshape(3, 3),
+            LOW_RES_SHAPE=(3, 3),
+            ORIGINAL_SHAPE=(3, 3),
+            ga_params={**params, "enable_fitness_cache": False},
+            model_params={},
+            n_jobs=1,
+            run_mode=None,
+        )
+        result_with_cache = optimize_uplift_ga(
+            obj_func=objective,
+            resampled_dem=np.arange(9, dtype=float).reshape(3, 3),
+            LOW_RES_SHAPE=(3, 3),
+            ORIGINAL_SHAPE=(3, 3),
+            ga_params={**params, "enable_fitness_cache": True},
+            model_params={},
+            n_jobs=1,
+            run_mode=None,
+        )
+
+        self.assertTrue(np.array_equal(result_without_cache[0], result_with_cache[0]))
+        self.assertEqual(result_without_cache[1], result_with_cache[1])
+
+    def test_diversity_fraction_allocation_exact_total(self):
+        """小种群下 diversity fraction 分配不能超过或少于可注入个体数。"""
+        counts = _allocate_counts(5, (0.3, 0.5, 0.2))
+
+        self.assertEqual(sum(counts), 5)
+        self.assertTrue(all(count >= 0 for count in counts))
+
+    def test_diversity_threshold_and_cooldown_trigger_injection(self):
+        """停滞 objective 应按 threshold/cooldown 触发 diversity injection。"""
+        np.random.seed(3)
+        ga = MyGA(
+            func=lambda x: 0.5,
+            n_dim=4,
+            size_pop=6,
+            max_iter=3,
+            prob_mut=0.0,
+            lb=0,
+            ub=10,
+            n_jobs=1,
+            enable_fitness_cache=False,
+            diversity_threshold=1,
+            diversity_cooldown=1,
+        )
+        ga.Chrom = np.ones((6, 4), dtype=int)
+        ga.low_res_shape = (2, 2)
+        ga.run(max_iter=3, patience=10, resampled_dem=np.ones((4, 4), dtype=float))
+
+        self.assertGreaterEqual(ga.diversity_injections, 1)
+        self.assertTrue(any(row["diversity_injected"] for row in ga.history_rows))
+
+    def test_mutation_schedule_respects_upper_bound_and_stagnation_boost(self):
+        """停滞增强可以提高 mutation，但不能超过 max multiplier。"""
+        ga = MyGA(
+            func=lambda x: 0.0,
+            n_dim=4,
+            size_pop=4,
+            max_iter=10,
+            prob_mut=0.1,
+            lb=0,
+            ub=10,
+            n_jobs=1,
+            mutation_schedule="adaptive",
+            mutation_max_multiplier=1.5,
+            mutation_stagnation_boost=True,
+            mutation_stagnation_multiplier=10.0,
+        )
+        ga.current_gen = 10
+        ga._stagnation_count = 3
+
+        self.assertAlmostEqual(ga.get_adaptive_mutation_prob(), 0.15)
+
+    def test_seed_population_from_previous_best_preserves_best_without_counting_injection(self):
+        """后续 stage 初始种群必须包含前一阶段 best，但不应计为停滞 diversity injection。"""
+        ga = MyGA(
+            func=lambda x: 0.0,
+            n_dim=4,
+            size_pop=6,
+            max_iter=1,
+            prob_mut=0.0,
+            lb=0,
+            ub=10,
+            n_jobs=1,
+        )
+        ga.low_res_shape = (2, 2)
+        ga.Chrom = np.zeros((6, 4), dtype=int)
+        best = np.array([5, 6, 7, 8], dtype=int)
+
+        ga.seed_population_from_best(best, resampled_dem=np.ones((4, 4), dtype=float))
+
+        self.assertTrue(np.array_equal(ga.Chrom[0], best))
+        self.assertEqual(ga.diversity_injections, 0)
+
+    def test_staged_search_runs_ordered_stages_and_writes_diagnostics(self):
+        """staged 模式应顺序执行、继承 best，并输出 GA 诊断文件。"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            calls = []
+
+            def objective(uplift_vector):
+                calls.append(np.asarray(uplift_vector, dtype=float).copy())
+                return float(np.mean((uplift_vector - 0.2) ** 2))
+
+            best_x, best_y, history = optimize_uplift_ga(
+                obj_func=objective,
+                resampled_dem=np.arange(9, dtype=float).reshape(3, 3),
+                LOW_RES_SHAPE=(3, 3),
+                ORIGINAL_SHAPE=(3, 3),
+                ga_params={
+                    "search_strategy": "staged",
+                    "enable_fitness_cache": True,
+                    "stages": [
+                        {
+                            "name": "coarse",
+                            "population_size": 4,
+                            "max_iterations": 1,
+                            "mutation_probability": 0.0,
+                            "cross_probability": 0.0,
+                            "patience": 2,
+                            "min_population_size": 4,
+                        },
+                        {
+                            "name": "refine",
+                            "population_size": 4,
+                            "max_iterations": 1,
+                            "mutation_probability": 0.0,
+                            "cross_probability": 0.0,
+                            "patience": 2,
+                            "min_population_size": 4,
+                        },
+                    ],
+                    "pop": 4,
+                    "max_iter": 1,
+                    "prob_cross": 0.0,
+                    "prob_mut": 0.0,
+                    "lb": 0.0,
+                    "ub": 0.4,
+                    "uplift_precision": 0.1,
+                    "decay_rate": 1.0,
+                    "min_size_pop": 4,
+                    "patience": 2,
+                    "random_seed": 5,
+                    "diagnostics_dir": tmpdir,
+                },
+                model_params={},
+                n_jobs=1,
+                run_mode=None,
+            )
+
+            metrics_dir = Path(tmpdir) / "metrics"
+            tables_dir = Path(tmpdir) / "tables"
+            ga_metrics = json.loads((metrics_dir / "ga_metrics.json").read_text(encoding="utf-8"))
+            stage_metrics = json.loads((metrics_dir / "stage_metrics.json").read_text(encoding="utf-8"))
+            with (tables_dir / "ga_history.csv").open(newline="", encoding="utf-8") as f:
+                rows = list(csv.DictReader(f))
+
+            self.assertIsNotNone(best_x)
+            self.assertLessEqual(best_y, stage_metrics[0]["best_fitness"])
+            self.assertEqual([stage["stage"] for stage in stage_metrics], ["coarse", "refine"])
+            self.assertFalse(stage_metrics[0]["inherited_previous_best"])
+            self.assertTrue(stage_metrics[1]["inherited_previous_best"])
+            self.assertEqual(ga_metrics["search_strategy"], "staged")
+            self.assertEqual(ga_metrics["stage_count"], 2)
+            self.assertEqual(len(history), 2)
+            self.assertEqual(len(rows), 2)
+            self.assertEqual([row["stage"] for row in rows], ["coarse", "refine"])
+            self.assertGreater(len(calls), 0)
 
 
 if __name__ == "__main__":

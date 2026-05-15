@@ -27,7 +27,7 @@ class PecubeEngineConfig:
     pecube_bin_dir: Path = Path("vendor/pecube/bin")
     project_dir: Path = Path("vendor/pecube/projects")
     dataset_name: str = "fastscape"
-    run_test: bool = True
+    run_test: bool = False
     run_vtk: bool = False
     compute_loss: bool = True
     sample_observations: Path | None = None
@@ -45,6 +45,7 @@ class PecubeEngineConfig:
     save_ptt_paths: bool = False
     lon0: float = 0.0
     lat0: float = 0.0
+    nskip: int = 4
     dlon: float = 0.01
     dlat: float = 0.01
 
@@ -151,7 +152,7 @@ class PecubeEngine:
             pecube_bin_dir=path_value("pecube_bin_dir", "vendor/pecube/bin"),
             project_dir=path_value("project_dir", "vendor/pecube/projects"),
             dataset_name=str(section.get("dataset_name", "fastscape")) if hasattr(section, "get") else "fastscape",
-            run_test=bool_value("run_test", True),
+            run_test=bool_value("run_test", False),
             run_vtk=bool_value("run_vtk", False),
             compute_loss=bool_value("compute_loss", True),
             sample_observations=sample_path,
@@ -169,6 +170,7 @@ class PecubeEngine:
             save_ptt_paths=bool_value("save_ptt_paths", False),
             lon0=float_value("lon0", 0.0),
             lat0=float_value("lat0", 0.0),
+            nskip=int_value("nskip", 4),
             dlon=float_value("dlon", 0.01),
             dlat=float_value("dlat", 0.01),
         )
@@ -189,7 +191,12 @@ class PecubeEngine:
     def validate(self) -> None:
         if not self.config.enabled:
             raise RuntimeError("[Pecube] enabled=false，pecube_coupled 模式需要启用 Pecube。")
-        missing = [name for name in ("Pecube", "Test") if not self._executable(name).exists()]
+        required = ["Pecube"]
+        if self.config.run_test:
+            required.append("Test")
+        if self.config.run_vtk:
+            required.append("Vtk")
+        missing = [name for name in required if not self._executable(name).exists()]
         if missing:
             raise FileNotFoundError(
                 "Pecube 可执行文件缺失: "
@@ -233,6 +240,7 @@ class PecubeEngine:
                 save_ptt_paths=self.config.save_ptt_paths,
                 lon0=self.config.lon0,
                 lat0=self.config.lat0,
+                nskip=self.config.nskip,
                 dlon=self.config.dlon,
                 dlat=self.config.dlat,
             )

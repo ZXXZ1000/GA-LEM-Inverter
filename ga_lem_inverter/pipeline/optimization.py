@@ -8,6 +8,8 @@ import psutil
 from tqdm import tqdm
 import time
 from joblib import Parallel, delayed
+import csv
+import json
 
 def _evaluate_fitness(obj_func, x):
     try:
@@ -25,6 +27,44 @@ def parallel_fitness(obj_func, X, n_jobs=-1):
     except Exception as e:
         logging.error(f"并行计算失败,切换为串行: {e}")
         return np.array([_evaluate_fitness(obj_func, x) for x in X])
+
+
+def _as_bool(value, default=False):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _chromosome_key(x):
+    return tuple(int(v) for v in np.asarray(x, dtype=int).reshape(-1))
+
+
+def _normalize_fractions(random_fraction, best_fraction, terrain_fraction):
+    values = np.asarray([random_fraction, best_fraction, terrain_fraction], dtype=float)
+    if not np.all(np.isfinite(values)) or np.any(values < 0):
+        raise ValueError("diversity fractions 必须是非负有限数。")
+    total = float(values.sum())
+    if total <= 0:
+        raise ValueError("diversity fractions 不能全部为 0。")
+    values = values / total
+    return tuple(float(v) for v in values)
+
+
+def _allocate_counts(total, fractions):
+    """Allocate integer counts with exact total and no negative values."""
+    total = int(total)
+    if total <= 0:
+        return [0 for _ in fractions]
+    raw = np.asarray(fractions, dtype=float) * total
+    counts = np.floor(raw).astype(int)
+    remainder = total - int(counts.sum())
+    if remainder > 0:
+        order = np.argsort(-(raw - counts))
+        for idx in order[:remainder]:
+            counts[idx] += 1
+    return [int(v) for v in counts]
 
 
 def _sanitize_fitness_values(values, penalty=1.0):
@@ -123,7 +163,12 @@ class MyGA:
     def __init__(self, func, n_dim, size_pop=50, max_iter=200, prob_mut=0.01,
                  lb=-1, ub=1, constraint_eq=tuple(), constraint_ueq=tuple(),
                  precision=1, decay_rate=0.95, min_size_pop=10, patience=40,
-                 n_jobs=-1):
+                 n_jobs=-1, enable_fitness_cache=False,
+                 diversity_threshold=None, diversity_cooldown=10,
+                 diversity_random_fraction=0.2, diversity_best_fraction=0.5,
+                 diversity_terrain_fraction=0.3,
+                 mutation_schedule="adaptive", mutation_max_multiplier=2.0,
+                 mutation_stagnation_boost=False, mutation_stagnation_multiplier=1.5):
         """
         初始化遗传算法类
 
@@ -159,6 +204,26 @@ class MyGA:
         self.n_jobs = n_jobs
         self.failure_threshold = 0.8
         self.max_consecutive_full_failures = 2
+        self.enable_fitness_cache = bool(enable_fitness_cache)
+        self.fitness_cache = {}
+        self.cache_hits = 0
+        self.cache_misses = 0
+        self.diversity_threshold = diversity_threshold
+        self.diversity_cooldown = max(0, int(diversity_cooldown))
+        (
+            self.diversity_random_fraction,
+            self.diversity_best_fraction,
+            self.diversity_terrain_fraction,
+        ) = _normalize_fractions(diversity_random_fraction, diversity_best_fraction, diversity_terrain_fraction)
+        self.diversity_injections = 0
+        self.mutation_schedule = str(mutation_schedule or "adaptive").strip().lower()
+        self.mutation_max_multiplier = max(1.0, float(mutation_max_multiplier))
+        self.mutation_stagnation_boost = bool(mutation_stagnation_boost)
+        self.mutation_stagnation_multiplier = max(1.0, float(mutation_stagnation_multiplier))
+        self._stagnation_count = 0
+        self._current_mutation_prob = self.prob_mut
+        self.history_rows = []
+        self.stage_name = "single"
 
         # 初始化种群和适应度
         self.Chrom = None
@@ -169,6 +234,36 @@ class MyGA:
         # 记录最优解
         self.best_x = None
         self.best_y = float('inf')
+
+    def evaluate_population(self):
+        """Evaluate population, using optional chromosome-level cache."""
+        if not self.enable_fitness_cache:
+            return parallel_fitness(self.func, self.X, n_jobs=self.n_jobs)
+
+        results = [None] * len(self.X)
+        missing_by_key = {}
+        missing_vectors = []
+        for idx, x in enumerate(self.X):
+            key = _chromosome_key(x)
+            if key in self.fitness_cache:
+                self.cache_hits += 1
+                results[idx] = self.fitness_cache[key]
+            elif key in missing_by_key:
+                self.cache_hits += 1
+                missing_by_key[key].append(idx)
+            else:
+                self.cache_misses += 1
+                missing_by_key[key] = [idx]
+                missing_vectors.append(x)
+
+        if missing_vectors:
+            evaluated = parallel_fitness(self.func, np.asarray(missing_vectors), n_jobs=self.n_jobs)
+            for key, value in zip(missing_by_key.keys(), evaluated):
+                self.fitness_cache[key] = float(value)
+                for idx in missing_by_key[key]:
+                    results[idx] = float(value)
+
+        return np.asarray(results, dtype=float)
 
     def init_population_based_on_terrain(self, matrix, lb, ub, low_res_shape, noise_level=10, random_fraction=0.2):
         """
@@ -428,9 +523,16 @@ class MyGA:
         获取自适应变异概率，随着迭代进度增加变异概率
         """
         base_prob = self.prob_mut
-        progress = min(1.0, self.current_gen / (self.max_iter * 0.7))
-        # 随着迭代进度增加变异概率，最大增加到原始概率的2倍
-        adaptive_prob = base_prob * (1 + progress)
+        if self.mutation_schedule in {"none", "fixed", "constant"}:
+            adaptive_prob = base_prob
+        else:
+            progress = min(1.0, self.current_gen / max(1.0, (self.max_iter * 0.7)))
+            adaptive_prob = base_prob * (1 + progress)
+        if self.mutation_stagnation_boost and self._stagnation_count > 0:
+            adaptive_prob *= self.mutation_stagnation_multiplier
+        max_prob = base_prob * self.mutation_max_multiplier
+        adaptive_prob = min(adaptive_prob, max_prob, 1.0)
+        self._current_mutation_prob = adaptive_prob
         return adaptive_prob
 
     def mutation(self):
@@ -518,14 +620,15 @@ class MyGA:
         elites = self.Chrom[:elite_size].copy()  # 假设种群已经排序
 
         # 确定注入策略的比例
-        random_fraction = 0.2       # 完全随机注入
-        best_based_fraction = 0.5   # 基于最优解的变异注入
-        terrain_fraction = 0.3      # 基于地形的注入
+        random_fraction = self.diversity_random_fraction
+        best_based_fraction = self.diversity_best_fraction
+        terrain_fraction = self.diversity_terrain_fraction
 
         # 计算各策略的个体数量
-        random_size = int(random_fraction * (self.size_pop - elite_size))
-        best_based_size = int(best_based_fraction * (self.size_pop - elite_size))
-        terrain_size = self.size_pop - elite_size - random_size - best_based_size
+        random_size, best_based_size, terrain_size = _allocate_counts(
+            self.size_pop - elite_size,
+            (random_fraction, best_based_fraction, terrain_fraction),
+        )
 
         # 创建新种群
         new_population = np.zeros((self.size_pop, self.n_dim), dtype=int)
@@ -596,8 +699,27 @@ class MyGA:
 
         # 更新种群
         self.Chrom = new_population
+        self.diversity_injections += 1
         logging.info(f"Diversity injected: {elite_size} elites, {random_size} random, "
                     f"{best_based_size} best-based, {terrain_size} terrain-based")
+
+    def seed_population_from_best(self, best_x, resampled_dem=None):
+        """Initialize this stage around a previous best while preserving diversity."""
+        if best_x is None:
+            return
+        if self.Chrom is None:
+            lb_val, ub_val = _safe_int_bounds(self.lb, self.ub)
+            self.Chrom = np.random.randint(lb_val, ub_val + 1, size=(self.size_pop, self.n_dim))
+        best_x = np.asarray(best_x, dtype=int).reshape(-1)
+        self.Chrom[0] = np.clip(best_x, self.lb, self.ub)
+        if self.size_pop > 1:
+            old = self.Chrom.copy()
+            injections_before = self.diversity_injections
+            self.inject_diversity(best_x=best_x, resampled_dem=resampled_dem)
+            self.diversity_injections = injections_before
+            self.Chrom[0] = np.clip(best_x, self.lb, self.ub)
+            if self.size_pop > 2:
+                self.Chrom[1] = old[0] if old.shape[0] else self.Chrom[1]
 
     def run(self, max_iter=None, patience=None, resampled_dem=None):
         """运行遗传算法优化"""
@@ -609,8 +731,12 @@ class MyGA:
         fitness_history = []
 
         # 多样性注入参数
-        diversity_threshold = max(1, min(25, patience_value // 2))  # 多样性注入触发阈值，避免 patience=1 时变成 0
-        diversity_cooldown = 10  # 多样性注入冷却期
+        diversity_threshold = self.diversity_threshold
+        if diversity_threshold is None:
+            diversity_threshold = max(1, min(25, patience_value // 2))
+        else:
+            diversity_threshold = max(1, int(diversity_threshold))
+        diversity_cooldown = self.diversity_cooldown
         last_injection_gen = -diversity_cooldown  # 上次注入的代数
 
         try:
@@ -622,7 +748,9 @@ class MyGA:
 
                 # 评估当前种群
                 self.X = self.Chrom.copy()
-                raw_y = parallel_fitness(self.func, self.X, n_jobs=self.n_jobs)
+                gen_cache_hits_before = self.cache_hits
+                gen_cache_misses_before = self.cache_misses
+                raw_y = self.evaluate_population()
                 self.Y, failure_mask = _sanitize_fitness_values(raw_y)
                 failure_count = int(np.count_nonzero(failure_mask))
                 failure_rate = failure_count / max(1, len(self.Y))
@@ -656,6 +784,12 @@ class MyGA:
                 else:
                     no_improve_count += 1
                     fitness_history.append(best[1])
+                self._stagnation_count = no_improve_count
+
+                generation_best = float(np.min(self.Y))
+                generation_mean = float(np.mean(self.Y))
+                generation_std = float(np.std(self.Y))
+                unique_chromosomes = int(len({_chromosome_key(row) for row in self.Chrom}))
 
                 # 选择、交叉和变异会生成下一代，不能再用这之后的种群记录当前代最优。
                 self.selection()
@@ -669,9 +803,33 @@ class MyGA:
                     self.inject_diversity(best_x=best[0], resampled_dem=resampled_dem)
                     last_injection_gen = gen
                     no_improve_count = 0  # 重置计数器
+                    injected = True
+                else:
+                    injected = False
 
                 # 动态调整种群大小
                 self.reduce_population_size()
+
+                self.history_rows.append({
+                    "stage": self.stage_name,
+                    "generation": int(gen),
+                    "best_fitness": float(best[1]),
+                    "generation_best_fitness": generation_best,
+                    "mean_fitness": generation_mean,
+                    "std_fitness": generation_std,
+                    "unique_chromosomes": unique_chromosomes,
+                    "cache_hits": int(self.cache_hits - gen_cache_hits_before),
+                    "cache_misses": int(self.cache_misses - gen_cache_misses_before),
+                    "cache_hits_total": int(self.cache_hits),
+                    "cache_misses_total": int(self.cache_misses),
+                    "cache_size": int(len(self.fitness_cache)),
+                    "diversity_injected": bool(injected),
+                    "diversity_injections_total": int(self.diversity_injections),
+                    "mutation_probability": float(self._current_mutation_prob),
+                    "population_size": int(self.size_pop),
+                    "failure_count": failure_count,
+                    "failure_rate": float(failure_rate),
+                })
 
                 logging.info(f"Generation {gen}: Best fitness = {best[1]}, Population size = {self.size_pop}")
                 # 检查早停条件
@@ -686,6 +844,18 @@ class MyGA:
 
         self.best_x, self.best_y = best if best is not None else (None, float('inf'))
         return self.best_x, self.best_y, fitness_history
+
+    def metrics(self):
+        total_cache = self.cache_hits + self.cache_misses
+        return {
+            "cache_hits": int(self.cache_hits),
+            "cache_misses": int(self.cache_misses),
+            "cache_size": int(len(self.fitness_cache)),
+            "cache_hit_rate": float(self.cache_hits / total_cache) if total_cache else 0.0,
+            "diversity_injections": int(self.diversity_injections),
+            "history_rows": len(self.history_rows),
+            "best_y": float(self.best_y),
+        }
 
 def optimize_uplift_ga(obj_func, resampled_dem, LOW_RES_SHAPE, ORIGINAL_SHAPE,
                       ga_params, model_params, n_jobs=-1, run_mode='cached'):
@@ -711,7 +881,6 @@ def optimize_uplift_ga(obj_func, resampled_dem, LOW_RES_SHAPE, ORIGINAL_SHAPE,
         if 'random_seed' in ga_params and ga_params['random_seed'] is not None:
             np.random.seed(int(ga_params['random_seed']))
 
-        # 设置遗传算法维度
         n_dim = LOW_RES_SHAPE[0] * LOW_RES_SHAPE[1]
         uplift_precision = _get_uplift_precision(ga_params)
         encoded_lb = _encode_uplift_value(ga_params['lb'], uplift_precision)
@@ -743,46 +912,206 @@ def optimize_uplift_ga(obj_func, resampled_dem, LOW_RES_SHAPE, ORIGINAL_SHAPE,
             except Exception as e:
                 logging.warning(f"Skipping scikit-opt run mode '{run_mode}': {e}")
 
-        # 创建遗传算法实例
-        ga = MyGA(
-            func=decoded_obj_func,
-            n_dim=n_dim,
-            size_pop=ga_params['pop'],
-            max_iter=ga_params['max_iter'],
-            prob_mut=ga_params['prob_mut'],
-            lb=lb_array,
-            ub=ub_array,
-            precision=uplift_precision,
-            decay_rate=ga_params.get('decay_rate', 0.95),
-            min_size_pop=ga_params.get('min_size_pop', 10),
-            patience=ga_params.get('patience', 40),
-            n_jobs=n_jobs
-        )
+        search_strategy = str(ga_params.get("search_strategy", "staged")).strip().lower()
+        if search_strategy not in {"single", "staged"}:
+            raise ValueError(f"search_strategy 必须是 single 或 staged，当前为 {search_strategy!r}")
 
-        # 基于地形初始化种群
-        ga.init_population_based_on_terrain(
-            matrix=resampled_dem,
-            lb=encoded_lb,
-            ub=encoded_ub,
-            low_res_shape=LOW_RES_SHAPE,
-            noise_level=3,
-            random_fraction=0.2
-        )
+        if search_strategy == "staged":
+            stages = ga_params.get("stages") or _default_stages_from_params(ga_params)
+        else:
+            stages = [_single_stage_from_params(ga_params)]
 
-        ga.prob_cross = ga_params['prob_cross']
+        logging.info("Starting genetic algorithm optimization (%s, %s stage(s))...", search_strategy, len(stages))
+        shared_cache = {} if _as_bool(ga_params.get("enable_fitness_cache"), True) else None
+        all_history_rows = []
+        stage_metrics = []
+        overall_best_x = None
+        overall_best_y = float("inf")
+        overall_history = []
+        previous_best_x = None
 
-        # 运行优化
-        logging.info("Starting genetic algorithm optimization...")
-        best_x, best_y, fitness_history = ga.run(
-            max_iter=ga_params['max_iter'],
-            patience=ga_params.get('patience', 40),
-            resampled_dem=resampled_dem
-        )
+        for stage_index, stage in enumerate(stages, start=1):
+            stage_name = str(stage.get("name", f"stage{stage_index}"))
+            stage_pop = int(stage.get("population_size", ga_params.get("pop", 10)))
+            stage_iter = int(stage.get("max_iterations", ga_params.get("max_iter", 10)))
+            stage_patience = int(stage.get("patience", ga_params.get("patience", stage_iter)))
+            stage_prob_mut = float(stage.get("mutation_probability", ga_params.get("prob_mut", 0.05)))
+            stage_prob_cross = float(stage.get("cross_probability", ga_params.get("prob_cross", 0.7)))
 
-        decoded_best_x = None if best_x is None else _decode_uplift_vector(best_x, uplift_precision)
-        return decoded_best_x, best_y, fitness_history
+            ga = MyGA(
+                func=decoded_obj_func,
+                n_dim=n_dim,
+                size_pop=stage_pop,
+                max_iter=stage_iter,
+                prob_mut=stage_prob_mut,
+                lb=lb_array,
+                ub=ub_array,
+                precision=uplift_precision,
+                decay_rate=float(stage.get("decay_rate", ga_params.get("decay_rate", 1.0))),
+                min_size_pop=int(stage.get("min_population_size", stage.get("min_size_pop", ga_params.get("min_size_pop", stage_pop)))),
+                patience=stage_patience,
+                n_jobs=n_jobs,
+                enable_fitness_cache=shared_cache is not None,
+                diversity_threshold=stage.get("diversity_threshold", ga_params.get("diversity_threshold")),
+                diversity_cooldown=stage.get("diversity_cooldown", ga_params.get("diversity_cooldown", 10)),
+                diversity_random_fraction=stage.get("diversity_random_fraction", ga_params.get("diversity_random_fraction", 0.2)),
+                diversity_best_fraction=stage.get("diversity_best_fraction", ga_params.get("diversity_best_fraction", 0.5)),
+                diversity_terrain_fraction=stage.get("diversity_terrain_fraction", ga_params.get("diversity_terrain_fraction", 0.3)),
+                mutation_schedule=stage.get("mutation_schedule", ga_params.get("mutation_schedule", "adaptive")),
+                mutation_max_multiplier=stage.get("mutation_max_multiplier", ga_params.get("mutation_max_multiplier", 2.0)),
+                mutation_stagnation_boost=_as_bool(stage.get("mutation_stagnation_boost", ga_params.get("mutation_stagnation_boost")), False),
+                mutation_stagnation_multiplier=stage.get("mutation_stagnation_multiplier", ga_params.get("mutation_stagnation_multiplier", 1.5)),
+            )
+            ga.stage_name = stage_name
+            if shared_cache is not None:
+                ga.fitness_cache = shared_cache
+            ga.init_population_based_on_terrain(
+                matrix=resampled_dem,
+                lb=encoded_lb,
+                ub=encoded_ub,
+                low_res_shape=LOW_RES_SHAPE,
+                noise_level=int(stage.get("terrain_noise_level", ga_params.get("terrain_noise_level", 3))),
+                random_fraction=float(stage.get("random_fraction", ga_params.get("random_fraction", 0.2))),
+            )
+            ga.prob_cross = stage_prob_cross
+            if previous_best_x is not None:
+                ga.seed_population_from_best(previous_best_x, resampled_dem=resampled_dem)
+
+            best_x, best_y, fitness_history = ga.run(
+                max_iter=stage_iter,
+                patience=stage_patience,
+                resampled_dem=resampled_dem
+            )
+            previous_best_x = best_x.copy() if best_x is not None else previous_best_x
+            if best_y < overall_best_y:
+                overall_best_x = best_x.copy() if best_x is not None else None
+                overall_best_y = float(best_y)
+            overall_history.extend([float(v) for v in fitness_history])
+            all_history_rows.extend(ga.history_rows)
+            metrics = ga.metrics()
+            metrics.update({
+                "stage": stage_name,
+                "stage_index": stage_index,
+                "inherited_previous_best": bool(stage_index > 1),
+                "population_size": stage_pop,
+                "max_iterations": stage_iter,
+                "mutation_probability": stage_prob_mut,
+                "cross_probability": stage_prob_cross,
+                "patience": stage_patience,
+                "best_fitness": float(best_y),
+                "is_global_best_stage": False,
+            })
+            stage_metrics.append(metrics)
+
+        best_stage_name = None
+        for metrics in stage_metrics:
+            if abs(metrics["best_fitness"] - overall_best_y) <= 1e-15:
+                metrics["is_global_best_stage"] = True
+                best_stage_name = metrics["stage"]
+                break
+
+        diagnostics_dir = ga_params.get("diagnostics_dir")
+        if diagnostics_dir:
+            _write_ga_diagnostics(
+                diagnostics_dir,
+                history_rows=all_history_rows,
+                stage_metrics=stage_metrics,
+                ga_metrics={
+                    "search_strategy": search_strategy,
+                    "stage_count": len(stages),
+                    "best_fitness": float(overall_best_y),
+                    "best_stage": best_stage_name,
+                    "cache_hits": int(sum(row.get("cache_hits", 0) for row in all_history_rows)),
+                    "cache_misses": int(sum(row.get("cache_misses", 0) for row in all_history_rows)),
+                    "cache_size": int(len(shared_cache) if shared_cache is not None else 0),
+                    "diversity_injections": int(sum(m.get("diversity_injections", 0) for m in stage_metrics)),
+                },
+            )
+
+        decoded_best_x = None if overall_best_x is None else _decode_uplift_vector(overall_best_x, uplift_precision)
+        return decoded_best_x, overall_best_y, overall_history
 
     except Exception as e:
         logging.error(f"Error in optimize_uplift_ga: {e}")
         logging.exception("Exception details:")
         raise
+
+
+def _single_stage_from_params(ga_params):
+    return {
+        "name": "single",
+        "population_size": ga_params.get("pop", 10),
+        "max_iterations": ga_params.get("max_iter", 10),
+        "mutation_probability": ga_params.get("prob_mut", 0.05),
+        "cross_probability": ga_params.get("prob_cross", 0.7),
+        "patience": ga_params.get("patience", ga_params.get("max_iter", 10)),
+        "min_population_size": ga_params.get("min_size_pop", ga_params.get("pop", 10)),
+    }
+
+
+def _default_stages_from_params(ga_params):
+    pop = int(ga_params.get("pop", 8))
+    max_iter = int(ga_params.get("max_iter", 8))
+    prob_mut = float(ga_params.get("prob_mut", 0.08))
+    prob_cross = float(ga_params.get("prob_cross", 0.7))
+    patience = int(ga_params.get("patience", max_iter))
+    return [
+        {
+            "name": "coarse",
+            "population_size": pop,
+            "max_iterations": max_iter,
+            "mutation_probability": max(prob_mut, 0.12),
+            "cross_probability": max(prob_cross, 0.75),
+            "patience": patience,
+            "min_population_size": pop,
+        },
+        {
+            "name": "refine",
+            "population_size": pop,
+            "max_iterations": max_iter,
+            "mutation_probability": prob_mut,
+            "cross_probability": prob_cross,
+            "patience": patience,
+            "min_population_size": pop,
+        },
+        {
+            "name": "verify",
+            "population_size": max(pop, int(round(pop * 1.25))),
+            "max_iterations": max(1, int(round(max_iter * 0.75))),
+            "mutation_probability": max(prob_mut * 0.6, 0.01),
+            "cross_probability": min(prob_cross, 0.65),
+            "patience": max(1, int(round(patience * 0.75))),
+            "min_population_size": max(pop, int(round(pop * 1.25))),
+        },
+    ]
+
+
+def _write_ga_diagnostics(diagnostics_dir, *, history_rows, stage_metrics, ga_metrics):
+    diagnostics_dir = os.fspath(diagnostics_dir)
+    tables_dir = os.path.join(diagnostics_dir, "tables")
+    metrics_dir = os.path.join(diagnostics_dir, "metrics")
+    os.makedirs(tables_dir, exist_ok=True)
+    os.makedirs(metrics_dir, exist_ok=True)
+
+    history_path = os.path.join(tables_dir, "ga_history.csv")
+    fieldnames = [
+        "stage", "generation", "best_fitness", "generation_best_fitness", "mean_fitness",
+        "std_fitness", "unique_chromosomes", "cache_hits", "cache_misses",
+        "cache_hits_total", "cache_misses_total", "cache_size", "diversity_injected",
+        "diversity_injections_total", "mutation_probability", "population_size",
+        "failure_count", "failure_rate",
+    ]
+    with open(history_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in history_rows:
+            writer.writerow({key: row.get(key, "") for key in fieldnames})
+
+    total = ga_metrics["cache_hits"] + ga_metrics["cache_misses"]
+    ga_metrics = dict(ga_metrics)
+    ga_metrics["cache_hit_rate"] = float(ga_metrics["cache_hits"] / total) if total else 0.0
+    ga_metrics["history_rows"] = len(history_rows)
+    with open(os.path.join(metrics_dir, "ga_metrics.json"), "w", encoding="utf-8") as f:
+        json.dump(ga_metrics, f, indent=2, ensure_ascii=False)
+    with open(os.path.join(metrics_dir, "stage_metrics.json"), "w", encoding="utf-8") as f:
+        json.dump(stage_metrics, f, indent=2, ensure_ascii=False)

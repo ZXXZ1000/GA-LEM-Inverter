@@ -94,6 +94,87 @@ def _config_float(
 from ga_lem_inverter.pipeline.path_validator import verify_config_paths, verify_file_path
 
 
+def _config_bool(
+    config: configparser.ConfigParser,
+    section: str,
+    option: str,
+    *,
+    fallback: bool,
+) -> bool:
+    if config.has_option(section, option):
+        return config.getboolean(section, option)
+    return fallback
+
+
+def _read_optimization_stages(config: configparser.ConfigParser) -> list[dict[str, Any]]:
+    stages: list[dict[str, Any]] = []
+    for section in config.sections():
+        if not section.lower().startswith("optimizationstage"):
+            continue
+        stage = {"name": config.get(section, "name", fallback=section)}
+        mappings = {
+            "population_size": int,
+            "max_iterations": int,
+            "mutation_probability": float,
+            "cross_probability": float,
+            "patience": int,
+            "min_population_size": int,
+            "diversity_threshold": int,
+            "diversity_cooldown": int,
+            "diversity_random_fraction": float,
+            "diversity_best_fraction": float,
+            "diversity_terrain_fraction": float,
+            "mutation_max_multiplier": float,
+            "mutation_stagnation_multiplier": float,
+        }
+        for key, caster in mappings.items():
+            if config.has_option(section, key):
+                stage[key] = caster(config.get(section, key))
+        for key in ("mutation_schedule",):
+            if config.has_option(section, key):
+                stage[key] = config.get(section, key)
+        if config.has_option(section, "mutation_stagnation_boost"):
+            stage["mutation_stagnation_boost"] = config.getboolean(section, "mutation_stagnation_boost")
+        stages.append((section, stage))
+    stages.sort(key=lambda item: item[0].lower())
+    return [stage for _, stage in stages]
+
+
+def _load_json_metrics(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    import json
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        logging.warning("无法读取 GA metrics: %s", path)
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _load_json_list(path: Path) -> list[Any]:
+    if not path.exists():
+        return []
+    import json
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        logging.warning("无法读取 JSON 列表输出: %s", path)
+        return []
+    return data if isinstance(data, list) else []
+
+
+def _json_exists(path: Path) -> bool:
+    if not path.exists():
+        return False
+    try:
+        path.read_text(encoding="utf-8")
+    except Exception:
+        logging.warning("无法读取 JSON 输出: %s", path)
+        return False
+    return True
+
+
 def validate_low_resolution_shape(shape: tuple[int, int], scale_factor: int) -> tuple[int, int]:
     """Validate the GA control grid implied by DEM shape and scale_factor."""
     rows, cols = (int(shape[0]), int(shape[1]))
@@ -747,8 +828,23 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
             'decay_rate': _config_float(config, 'Optimization', 'decay_rate', fallback=1.0, aliases=(('GeneticAlgorithm', 'decay_rate'),)),
             'min_size_pop': _config_int(config, 'Optimization', 'min_population_size', fallback=4, aliases=(('GeneticAlgorithm', 'min_size_pop'),)),
             'patience': _config_int(config, 'Optimization', 'patience', fallback=3, aliases=(('GeneticAlgorithm', 'patience'),)),
-            'random_seed': random_seed
+            'random_seed': random_seed,
+            'search_strategy': config.get('Optimization', 'search_strategy', fallback='staged').strip().lower(),
+            'enable_fitness_cache': _config_bool(config, 'Optimization', 'enable_fitness_cache', fallback=True),
+            'diversity_threshold': config.get('Optimization', 'diversity_threshold', fallback=None),
+            'diversity_cooldown': _config_int(config, 'Optimization', 'diversity_cooldown', fallback=3),
+            'diversity_random_fraction': _config_float(config, 'Optimization', 'diversity_random_fraction', fallback=0.3),
+            'diversity_best_fraction': _config_float(config, 'Optimization', 'diversity_best_fraction', fallback=0.5),
+            'diversity_terrain_fraction': _config_float(config, 'Optimization', 'diversity_terrain_fraction', fallback=0.2),
+            'mutation_schedule': config.get('Optimization', 'mutation_schedule', fallback='adaptive').strip().lower(),
+            'mutation_max_multiplier': _config_float(config, 'Optimization', 'mutation_max_multiplier', fallback=2.5),
+            'mutation_stagnation_boost': _config_bool(config, 'Optimization', 'mutation_stagnation_boost', fallback=True),
+            'mutation_stagnation_multiplier': _config_float(config, 'Optimization', 'mutation_stagnation_multiplier', fallback=1.5),
+            'diagnostics_dir': str(context.root),
         }
+        stages = _read_optimization_stages(config)
+        if stages:
+            ga_params['stages'] = stages
 
         model_params = {
             'Ksp': rotated_Ksp, # 使用 *旋转后* 的 Ksp
@@ -915,6 +1011,24 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
 
         logging.info(f"Optimization completed in {end_time - start_time:.2f} seconds")
         logging.info(f"Best fitness: {best_fitness}")
+        ga_metrics_path = context.metrics_dir / "ga_metrics.json"
+        ga_history_path = context.tables_dir / "ga_history.csv"
+        stage_metrics_path = context.metrics_dir / "stage_metrics.json"
+        ga_metrics = _load_json_metrics(ga_metrics_path)
+        stage_metrics_payload = _load_json_list(stage_metrics_path)
+        if ga_metrics:
+            context.add_artifact(ga_metrics_path)
+            context.add_artifact(ga_history_path)
+            for key, value in ga_metrics.items():
+                context.metrics[f"ga_{key}"] = _json_metric_value(value)
+        if stage_metrics_payload or _json_exists(stage_metrics_path):
+            context.add_artifact(stage_metrics_path)
+        if stage_metrics_payload:
+            context.metrics["ga_stage_list"] = ", ".join(str(stage.get("stage", "")) for stage in stage_metrics_payload)
+            context.metrics["ga_stage_best_fitness"] = {
+                str(stage.get("stage", f"stage{idx + 1}")): _json_metric_value(stage.get("best_fitness"))
+                for idx, stage in enumerate(stage_metrics_payload)
+            }
 
         # 6. 结果处理和可视化
         logging.info("Step 5: 结果处理和可视化")
@@ -1139,6 +1253,7 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
                 "optimization_time_seconds": float(end_time - start_time),
                 "original_shape": list(ORIGINAL_SHAPE),
                 "low_res_shape": list(LOW_RES_SHAPE),
+                **{f"ga_{k}": _json_metric_value(v) for k, v in ga_metrics.items()},
                 **{k: _json_metric_value(v) for k, v in demo_metrics.items()},
             }
 

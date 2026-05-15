@@ -32,6 +32,7 @@ class PecubeProjectConfig:
     dlat: float = 0.01
     lon0: float = 0.0
     lat0: float = 0.0
+    nskip: int = 4
     total_time_myr: float = 1.0
     velocity_km_per_myr: float = 1.0
     include_uniform_velocity_field: bool = False
@@ -206,6 +207,7 @@ class PecubeProjectBuilder:
         rows, cols = shape
         nx = self.config.nx or cols
         ny = self.config.ny or rows
+        nskip = max(1, int(self.config.nskip))
         total_time = max(float(self.config.total_time_myr), 1e-6)
         ntime = max(int(ntime), 1)
         step = total_time / ntime
@@ -216,7 +218,7 @@ class PecubeProjectBuilder:
             f"echo_input_file = {1 if self.config.echo_input_file else 0}",
             f"nx = {nx}",
             f"ny = {ny}",
-            "nskip = 1",
+            f"nskip = {nskip}",
             f"lon0 = {self.config.lon0}",
             f"lat0 = {self.config.lat0}",
             f"dlon = {self.config.dlon}",
