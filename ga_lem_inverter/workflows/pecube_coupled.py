@@ -25,7 +25,7 @@ from ga_lem_inverter.integrations.pecube_fitness import (
 )
 from ga_lem_inverter.outputs import RunContext, write_metrics
 from ga_lem_inverter.workflows.common import config_float, config_int, create_synthetic_uplift, model_params_from_config
-from ga_lem_inverter.pipeline.forward_model import run_fastscape_model
+from ga_lem_inverter.pipeline.forward_model import run_fastscape_series
 from ga_lem_inverter.pipeline.synthetic_erosion import create_synthetic_erosion_field
 
 
@@ -50,14 +50,10 @@ def run_pecube_coupled_workflow(config: configparser.ConfigParser, context: RunC
     ksp = create_synthetic_erosion_field(shape=shape, base_k_sp=config_float(config, "Model", "k_sp_value", 6.92e-6))
     model_params = model_params_from_config(config, shape)
 
-    topographies: list[np.ndarray] = []
-    uplifts: list[np.ndarray] = []
-    for index in range(n_steps):
-        factor = (index + 1) / n_steps
-        uplift = true_uplift * factor
-        topography = run_fastscape_model(
+    topographies = list(
+        run_fastscape_series(
             k_sp=ksp,
-            uplift=uplift,
+            uplift=true_uplift,
             k_diff=model_params["d_diff"],
             x_size=shape[1],
             y_size=shape[0],
@@ -65,18 +61,32 @@ def run_pecube_coupled_workflow(config: configparser.ConfigParser, context: RunC
             boundary_status=model_params["boundary_status"],
             area_exp=model_params["area_exp"],
             slope_exp=model_params["slope_exp"],
-            time_total=model_params["time_total"] * factor,
+            time_total=model_params["time_total"],
+            output_steps=n_steps,
         )
-        topographies.append(np.asarray(topography, dtype=float))
-        # Pecube expects uplift in a simple grid sequence. Use mm/yr values for
-        # the data files and a separate uniform velocity in Pecube.in.
-        uplifts.append(np.asarray(uplift, dtype=float))
+    )
+    uplifts = [np.asarray(true_uplift, dtype=float).copy() for _ in topographies]
+    observations_for_project = None
+    if engine.config.sample_observations:
+        coordinate_system = config.get("Pecube", "observation_coordinate_system", fallback="pecube_output")
+        observations_for_project = load_observations(
+            engine.config.sample_observations,
+            shape,
+            coordinate_system=coordinate_system,
+            dlon=engine.config.dlon,
+            dlat=engine.config.dlat,
+            lon0=engine.config.lon0,
+            lat0=engine.config.lat0,
+            dem_crs="EPSG:4326",
+            observation_crs=config.get("Pecube", "observation_crs", fallback="EPSG:4326"),
+        )
 
     pecube_dir = context.root / "pecube"
     result = engine.run(
         topography_series=list(reversed(topographies)),
         uplift_series=list(reversed(uplifts)),
         sample_observations=engine.config.sample_observations,
+        normalized_observations=observations_for_project,
         output_dir=pecube_dir,
     )
 
@@ -89,18 +99,7 @@ def run_pecube_coupled_workflow(config: configparser.ConfigParser, context: RunC
     metrics = dict(result.metrics)
     metrics["pecube_project_dir"] = str(result.project.project_dir)
     if engine.config.sample_observations:
-        coordinate_system = config.get("Pecube", "observation_coordinate_system", fallback="pecube_output")
-        observations = load_observations(
-            engine.config.sample_observations,
-            shape,
-            coordinate_system=coordinate_system,
-            dlon=engine.config.dlon,
-            dlat=engine.config.dlat,
-            lon0=engine.config.lon0,
-            lat0=engine.config.lat0,
-            dem_crs="EPSG:4326",
-            observation_crs=config.get("Pecube", "observation_crs", fallback="EPSG:4326"),
-        )
+        observations = observations_for_project or []
         predictions = predictions_from_parsed(result.parsed, observations)
         thermo_loss = normalized_rmse([item.normalized_residual for item in predictions])
         prediction_path = context.tables_dir / "predicted_thermochronology.csv"

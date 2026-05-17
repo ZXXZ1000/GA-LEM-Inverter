@@ -131,6 +131,9 @@ class PecubeEngine:
         def float_value(key: str, default: float) -> float:
             if "Pecube" not in config or key not in config["Pecube"]:
                 return default
+            raw = config.get("Pecube", key).strip().lower()
+            if raw in {"auto", "default"}:
+                return default
             return config.getfloat("Pecube", key)
 
         def int_value(key: str, default: int) -> int:
@@ -146,6 +149,7 @@ class PecubeEngine:
         mode = config.get("Run", "mode", fallback="")
         has_sample_observations = sample_path is not None
         enabled_default = mode == "pecube_coupled" or has_sample_observations
+        model_time_myr = config.getfloat("Model", "time_total", fallback=1.0e6) / 1_000_000.0
         engine_config = PecubeEngineConfig(
             enabled=bool_value("enabled", enabled_default),
             pecube_root=path_value("pecube_root", "vendor/pecube"),
@@ -156,7 +160,7 @@ class PecubeEngine:
             run_vtk=bool_value("run_vtk", False),
             compute_loss=bool_value("compute_loss", True),
             sample_observations=sample_path,
-            total_time_myr=float_value("total_time_myr", 1.0),
+            total_time_myr=float_value("total_time_myr", model_time_myr),
             velocity_km_per_myr=float_value("velocity_km_per_myr", 1.0),
             include_uniform_velocity_field=bool_value("include_uniform_velocity_field", False),
             thickness=float_value("thickness", 35.0),
@@ -211,6 +215,7 @@ class PecubeEngine:
         uplift_series: Iterable[np.ndarray],
         temperature_series: Iterable[np.ndarray] | None = None,
         sample_observations: Path | None = None,
+        normalized_observations: Iterable[Any] | None = None,
         output_dir: Path,
     ) -> PecubeResult:
         self.validate()
@@ -252,6 +257,7 @@ class PecubeEngine:
             uplift_series=uplift_series,
             temperature_series=temperature_series,
             sample_observations=observations,
+            normalized_observations=normalized_observations,
         )
 
         commands: list[PecubeCommandResult] = []

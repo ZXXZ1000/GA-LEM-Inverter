@@ -899,6 +899,9 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
             total_simulation_time=total_simulation_time,
             terrain_resolution=terrain_resolution,
             feature_smooth_radius=feature_smooth_radius,
+            boundary_status=model_params["boundary_status"],
+            area_exp=model_params["area_exp"],
+            slope_exp=model_params["slope_exp"],
             use_lpips=use_lpips,
             pecube_evaluator=pecube_evaluator,
             pecube_time_steps=pecube_time_steps,
@@ -1158,6 +1161,37 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
                 for key, value in demo_metrics.items():
                     metrics_file.write(f"{key} = {value:.6f}\n")
             context.add_artifact(metrics_txt_path)
+            if pecube_evaluator.enabled:
+                final_series = run_fastscape_series(
+                    k_sp=rotated_Ksp,
+                    uplift=best_full_res_uplift,
+                    k_diff=D_DIFF,
+                    x_size=col,
+                    y_size=row,
+                    spacing=spacing,
+                    boundary_status=model_params['boundary_status'],
+                    area_exp=config.getfloat('Model', 'area_exp'),
+                    slope_exp=config.getfloat('Model', 'slope_exp'),
+                    time_total=total_simulation_time,
+                    output_steps=max(2, pecube_time_steps),
+                )
+                final_terrain_loss = 1 - terrain_similarity(
+                    matrix1=resampled_dem,
+                    matrix2=final_series[-1],
+                    resolution=terrain_resolution,
+                    smooth_radius=feature_smooth_radius,
+                    use_lpips=use_lpips,
+                )
+                final_pecube_result = pecube_evaluator.evaluate(
+                    terrain_loss=final_terrain_loss,
+                    generated_dem=final_series[-1],
+                    uplift=best_full_res_uplift,
+                    topography_series=final_series,
+                    uplift_series=np.repeat(best_full_res_uplift[np.newaxis, :, :], len(final_series), axis=0),
+                    force=True,
+                    force_best=True,
+                )
+                demo_metrics.update(final_pecube_result.metrics())
             pecube_metrics = pecube_evaluator.save_best_outputs(
                 generated_dem=final_elevation,
                 uplift=best_full_res_uplift,

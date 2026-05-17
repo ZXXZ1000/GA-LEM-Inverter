@@ -120,6 +120,41 @@ class MainInversionValidationAcceptanceTests(unittest.TestCase):
         self.assertEqual(evaluator.call["uplift_series"].shape, series.shape)
         self.assertNotIn("temperature_series", evaluator.call)
 
+    def test_objective_passes_configured_fastscape_parameters(self):
+        """产品验收：主反演 objective 必须使用 config.ini 中的 FastScape 边界和指数。"""
+        with mock.patch(
+            "ga_lem_inverter.workflows.main_inversion.interpolate_uplift_cv",
+            return_value=np.full((2, 2), 0.5, dtype=float),
+        ), mock.patch(
+            "ga_lem_inverter.workflows.main_inversion.run_fastscape_model",
+            return_value=np.ones((2, 2), dtype=float),
+        ) as model_mock, mock.patch(
+            "ga_lem_inverter.workflows.main_inversion.terrain_similarity",
+            return_value=0.8,
+        ):
+            objective = create_objective_function(
+                resampled_dem=np.ones((2, 2), dtype=float),
+                LOW_RES_SHAPE=(1, 1),
+                ORIGINAL_SHAPE=(2, 2),
+                Ksp=np.ones((2, 2), dtype=float),
+                D_DIFF=0.1,
+                row=2,
+                col=2,
+                spacing=100.0,
+                time_step_num=3,
+                total_simulation_time=1000.0,
+                terrain_resolution=100.0,
+                feature_smooth_radius=1,
+                boundary_status=["fixed_value", "fixed_value", "fixed_value", "core"],
+                area_exp=0.42,
+                slope_exp=1.3,
+            )
+            objective(np.array([0.5]))
+
+        self.assertEqual(model_mock.call_args.kwargs["boundary_status"], ["fixed_value", "fixed_value", "fixed_value", "core"])
+        self.assertEqual(model_mock.call_args.kwargs["area_exp"], 0.42)
+        self.assertEqual(model_mock.call_args.kwargs["slope_exp"], 1.3)
+
 
 if __name__ == "__main__":
     unittest.main()

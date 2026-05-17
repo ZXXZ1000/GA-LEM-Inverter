@@ -92,6 +92,43 @@ class MyGATests(unittest.TestCase):
         self.assertFalse(np.all(np.equal(best_x, best_x.astype(int))))
         self.assertAlmostEqual(best_y, history[-1])
 
+    def test_uplift_encoding_respects_unaligned_real_bounds(self):
+        """产品验收：非步长整数倍的 uplift 边界不能越界搜索。"""
+        seen_values = []
+
+        def objective(uplift_vector):
+            uplift_vector = np.asarray(uplift_vector, dtype=float)
+            seen_values.append(uplift_vector.copy())
+            return float(np.mean(uplift_vector))
+
+        optimize_uplift_ga(
+            obj_func=objective,
+            resampled_dem=np.arange(4, dtype=float).reshape(2, 2),
+            LOW_RES_SHAPE=(2, 2),
+            ORIGINAL_SHAPE=(2, 2),
+            ga_params={
+                "pop": 4,
+                "max_iter": 1,
+                "search_strategy": "single",
+                "prob_cross": 0.0,
+                "prob_mut": 0.0,
+                "lb": 0.15,
+                "ub": 0.26,
+                "uplift_precision": 0.1,
+                "decay_rate": 1.0,
+                "min_size_pop": 4,
+                "patience": 10,
+                "random_seed": 7,
+            },
+            model_params={},
+            n_jobs=1,
+            run_mode=None,
+        )
+
+        all_values = np.concatenate(seen_values)
+        self.assertTrue(np.all(all_values >= 0.2 - 1e-12))
+        self.assertTrue(np.all(all_values <= 0.2 + 1e-12))
+
     def test_spatial_crossover_handles_small_low_resolution_shapes(self):
         """低分辨率矩阵很小时，block_size 不能变成 0。"""
         shapes = [(1, 8), (2, 2), (8, 8)]
@@ -188,6 +225,31 @@ class MyGATests(unittest.TestCase):
         self.assertTrue(np.isfinite(ga.Chrom).all())
         self.assertTrue(np.all(ga.Chrom >= 1))
         self.assertTrue(np.all(ga.Chrom <= 10))
+
+    def test_diversity_injection_preserves_best_and_never_leaves_zero_slots(self):
+        """停滞注入必须显式保留 best，并且所有槽位都在合法边界内。"""
+        ga = MyGA(
+            func=lambda x: 0.0,
+            n_dim=4,
+            size_pop=6,
+            max_iter=1,
+            prob_mut=0,
+            lb=2,
+            ub=5,
+            n_jobs=1,
+            diversity_random_fraction=0.0,
+            diversity_best_fraction=1.0,
+            diversity_terrain_fraction=0.0,
+        )
+        ga.low_res_shape = (2, 2)
+        ga.Chrom = np.full((6, 4), 3, dtype=int)
+        best = np.full(4, 5, dtype=int)
+
+        ga.inject_diversity(best_x=best, resampled_dem=None)
+
+        self.assertTrue(np.array_equal(ga.Chrom[0], best))
+        self.assertTrue(np.all(ga.Chrom >= 2))
+        self.assertTrue(np.all(ga.Chrom <= 5))
 
     def test_ga_aborts_when_objective_systematically_returns_invalid_values(self):
         """整代 objective 系统性失败时，不应继续假装优化成功。"""

@@ -207,6 +207,49 @@ class PecubeSchemaAcceptanceTests(unittest.TestCase):
         self.assertEqual(engine.config.nskip, 5)
         self.assertFalse(engine.config.run_vtk)
 
+    def test_pecube_engine_defaults_total_time_from_model_time(self):
+        """产品验收：Pecube 默认时间尺度必须跟随 FastScape 模拟总时长。"""
+        import configparser
+
+        config = configparser.ConfigParser()
+        config["Run"] = {"mode": "pecube_coupled"}
+        config["Model"] = {"time_total": "2500000"}
+        config["Pecube"] = {"enabled": "false"}
+
+        engine = PecubeEngine.from_config(config)
+
+        self.assertAlmostEqual(engine.config.total_time_myr, 2.5)
+
+    def test_project_builder_can_write_normalized_observation_rows(self):
+        """产品验收：Pecube A-file 应使用已转换到 Pecube lon/lat 的观测坐标。"""
+        from ga_lem_inverter.integrations.pecube_fitness import ThermochronologyObservation
+
+        topographies = [np.zeros((2, 2), dtype=float), np.ones((2, 2), dtype=float)]
+        uplifts = [np.ones((2, 2), dtype=float), np.ones((2, 2), dtype=float)]
+        observations = [
+            ThermochronologyObservation("G1", 103.25, 31.75, 1200.0, "AHe", 10.0, 0.5),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = Path(tmpdir) / "raw.csv"
+            source.write_text(
+                "sample_id,x,y,elevation,system,observed_age,sigma\nG1,5,7,1200,AHe,10,0.5\n",
+                encoding="utf-8",
+            )
+            builder = PecubeProjectBuilder(PecubeProjectConfig())
+            project = builder.build(
+                project_dir=Path(tmpdir) / "PGB01",
+                topography_series=topographies,
+                uplift_series=uplifts,
+                sample_observations=source,
+                normalized_observations=observations,
+            )
+            rows = list(csv.DictReader((project.data_dir / "observations" / "observations.csv").open(newline="", encoding="utf-8")))
+
+        self.assertEqual(rows[0]["LON"], "103.25")
+        self.assertEqual(rows[0]["LAT"], "31.75")
+        self.assertEqual(list(rows[0].keys()), ["SAMPLE", "LON", "LAT", "HEIGHT", "AHE", "DAHE", "AFT", "DAFT", "ZHE", "DZHE", "ZFT", "DZFT"])
+
     def test_pecube_engine_uses_low_output_defaults(self):
         """产品验收：默认 Pecube 优化搜索不运行 Test/Vtk，且使用 nskip=4。"""
         import configparser

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import configparser
 import csv
+import inspect
 import json
 import logging
 import math
@@ -309,6 +310,8 @@ class PecubeFitnessEvaluator:
         topography_series: np.ndarray | list[np.ndarray] | None = None,
         uplift_series: np.ndarray | list[np.ndarray] | None = None,
         temperature_series: np.ndarray | list[np.ndarray] | None = None,
+        force: bool = False,
+        force_best: bool = False,
     ) -> PecubeConstraintResult:
         if not self.enabled:
             return PecubeConstraintResult(
@@ -326,7 +329,7 @@ class PecubeFitnessEvaluator:
                 "Pecube 热年代学样品尚未完成坐标转换。"
                 "请确认 [Pecube] spatial_grid=auto 且 DEM 有 CRS/transform，或设置 spatial_grid=manual 并填写 lon0/lat0/dlon/dlat。"
             )
-        if evaluation_id % self.run_every != 0:
+        if not force and evaluation_id % self.run_every != 0:
             terrain_loss_norm = normalize_unit_loss(terrain_loss)
             thermo_loss = 1.0
             total = weighted_unit_loss(terrain_loss_norm, thermo_loss, self.terrain_weight, self.thermo_weight)
@@ -341,7 +344,7 @@ class PecubeFitnessEvaluator:
             )
             self._record(result, evaluation_id=evaluation_id)
             return result
-        if self.max_evaluations and evaluation_id > self.max_evaluations:
+        if not force and self.max_evaluations and evaluation_id > self.max_evaluations:
             terrain_loss_norm = normalize_unit_loss(terrain_loss)
             thermo_loss = 1.0
             total = weighted_unit_loss(terrain_loss_norm, thermo_loss, self.terrain_weight, self.thermo_weight)
@@ -376,13 +379,20 @@ class PecubeFitnessEvaluator:
                 series=temperature_series,
                 topographies=pecube_topographies,
             )
-            result = self.engine.run(
-                topography_series=pecube_topographies,
-                uplift_series=pecube_uplifts,
-                temperature_series=pecube_temperatures,
-                sample_observations=self.engine.config.sample_observations,
-                output_dir=eval_dir,
-            )
+            run_kwargs = {
+                "topography_series": pecube_topographies,
+                "uplift_series": pecube_uplifts,
+                "temperature_series": pecube_temperatures,
+                "sample_observations": self.engine.config.sample_observations,
+                "output_dir": eval_dir,
+            }
+            signature = inspect.signature(self.engine.run)
+            if "normalized_observations" in signature.parameters or any(
+                parameter.kind == inspect.Parameter.VAR_KEYWORD
+                for parameter in signature.parameters.values()
+            ):
+                run_kwargs["normalized_observations"] = self.observations
+            result = self.engine.run(**run_kwargs)
             predictions = predictions_from_parsed(
                 result.parsed,
                 self.observations,
@@ -413,7 +423,7 @@ class PecubeFitnessEvaluator:
                     "pecube_time_order": "present_to_past",
                 },
             )
-            self._record(constraint, evaluation_id=evaluation_id)
+            self._record(constraint, evaluation_id=evaluation_id, force_best=force_best)
             return constraint
         except Exception as exc:
             failure_path = eval_dir / "pecube_failure.json"
@@ -438,7 +448,7 @@ class PecubeFitnessEvaluator:
                 message=f"Pecube 评价失败，已使用惩罚项: {exc}",
                 raw_metrics={"terrain_loss_raw": float(terrain_loss), "thermo_loss_raw": self.penalty_loss},
             )
-            self._record(constraint, evaluation_id=evaluation_id)
+            self._record(constraint, evaluation_id=evaluation_id, force_best=force_best)
             return constraint
 
     def save_best_outputs(
@@ -623,7 +633,7 @@ class PecubeFitnessEvaluator:
         )
         return [surface_temperature_from_topography(array, project_config) for array in topographies]
 
-    def _record(self, result: PecubeConstraintResult, *, evaluation_id: int) -> None:
+    def _record(self, result: PecubeConstraintResult, *, evaluation_id: int, force_best: bool = False) -> None:
         row = {
             "evaluation": evaluation_id,
             "terrain_loss": result.terrain_loss,
@@ -639,7 +649,7 @@ class PecubeFitnessEvaluator:
         self._write_result_record(result, row)
         if result.thermo_loss is None or not result.predictions:
             return
-        if self.best_result is None or result.total_loss < self.best_result.total_loss:
+        if force_best or self.best_result is None or result.total_loss < self.best_result.total_loss:
             self.best_result = result
 
     def _write_result_record(self, result: PecubeConstraintResult, row: dict[str, Any]) -> None:

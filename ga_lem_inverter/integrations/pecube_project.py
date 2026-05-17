@@ -6,7 +6,7 @@ import csv
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 import numpy as np
 
@@ -66,6 +66,7 @@ class PecubeProjectBuilder:
         uplift_series: Iterable[np.ndarray],
         temperature_series: Iterable[np.ndarray] | None = None,
         sample_observations: Path | None = None,
+        normalized_observations: Iterable[Any] | None = None,
     ) -> PecubeProject:
         topographies = [self._as_2d_array(array, "topography") for array in topography_series]
         uplifts = [self._as_2d_array(array, "uplift") for array in uplift_series]
@@ -110,7 +111,10 @@ class PecubeProjectBuilder:
             samples_dir = data_dir / "observations"
             samples_dir.mkdir(parents=True, exist_ok=True)
             native_observation_path = samples_dir / "observations.csv"
-            self._write_native_observation_file(Path(sample_observations), native_observation_path)
+            if normalized_observations is not None:
+                self._write_native_observation_rows(normalized_observations, native_observation_path)
+            else:
+                self._write_native_observation_file(Path(sample_observations), native_observation_path)
 
         input_file = input_dir / "Pecube.in"
         input_file.write_text(
@@ -183,6 +187,61 @@ class PecubeProjectBuilder:
         if not grouped:
             raise ValueError(f"观测样品 CSV 没有可写入 Pecube 的样品行: {source_path}")
 
+        fieldnames = [
+            "SAMPLE",
+            "LON",
+            "LAT",
+            "HEIGHT",
+            "AHE",
+            "DAHE",
+            "AFT",
+            "DAFT",
+            "ZHE",
+            "DZHE",
+            "ZFT",
+            "DZFT",
+        ]
+        with target_path.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            for sample_id in sorted(grouped):
+                writer.writerow(grouped[sample_id])
+
+    @staticmethod
+    def _write_native_observation_rows(observations: Iterable[Any], target_path: Path) -> None:
+        grouped: dict[str, dict[str, str | float]] = {}
+        mapping = {
+            "ahe": ("AHE", "DAHE"),
+            "heapatite": ("AHE", "DAHE"),
+            "apatitehe": ("AHE", "DAHE"),
+            "zhe": ("ZHE", "DZHE"),
+            "hezircon": ("ZHE", "DZHE"),
+            "zirconhe": ("ZHE", "DZHE"),
+            "aft": ("AFT", "DAFT"),
+            "ftapatite": ("AFT", "DAFT"),
+            "apatiteft": ("AFT", "DAFT"),
+            "zft": ("ZFT", "DZFT"),
+            "ftzircon": ("ZFT", "DZFT"),
+            "zirconft": ("ZFT", "DZFT"),
+        }
+        for observation in observations:
+            sample_id = str(getattr(observation, "sample_id")).strip()
+            system = str(getattr(observation, "system")).strip().lower().replace("-", "").replace("_", "")
+            columns = mapping.get(system)
+            if not sample_id or columns is None:
+                continue
+            sample = grouped.setdefault(
+                sample_id,
+                {
+                    "SAMPLE": sample_id,
+                    "LON": float(getattr(observation, "x")),
+                    "LAT": float(getattr(observation, "y")),
+                    "HEIGHT": float(getattr(observation, "elevation")),
+                },
+            )
+            value_column, sigma_column = columns
+            sample[value_column] = float(getattr(observation, "observed_age"))
+            sample[sigma_column] = float(getattr(observation, "sigma"))
         fieldnames = [
             "SAMPLE",
             "LON",

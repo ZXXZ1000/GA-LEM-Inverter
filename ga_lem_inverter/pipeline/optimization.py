@@ -1,5 +1,6 @@
 # genetic_algorithm.py
 import numpy as np
+import math
 from scipy.ndimage import gaussian_filter
 import logging
 import os
@@ -87,6 +88,17 @@ def _get_uplift_precision(ga_params):
 def _encode_uplift_value(value, precision):
     """把真实隆升率 mm/yr 转成 GA 内部整数编码。"""
     return int(round(float(value) / precision))
+
+
+def _encode_uplift_bounds(lb, ub, precision):
+    encoded_lb = int(math.ceil(float(lb) / precision - 1e-12))
+    encoded_ub = int(math.floor(float(ub) / precision + 1e-12))
+    if encoded_lb > encoded_ub:
+        raise ValueError(
+            f"uplift_min/uplift_max 与 uplift_precision 不兼容: "
+            f"{lb}..{ub} mm/yr, precision={precision}"
+        )
+    return encoded_lb, encoded_ub
 
 
 def _decode_uplift_vector(encoded_vector, precision):
@@ -630,14 +642,16 @@ class MyGA:
             (random_fraction, best_based_fraction, terrain_fraction),
         )
 
-        # 创建新种群
-        new_population = np.zeros((self.size_pop, self.n_dim), dtype=int)
+        lb_val, ub_val = _safe_int_bounds(self.lb, self.ub)
+
+        # 创建新种群。先填充合法随机个体，避免不可用策略留下越界 0 值。
+        new_population = np.random.randint(lb_val, ub_val + 1, size=(self.size_pop, self.n_dim))
         new_population[:elite_size] = elites
+        if best_x is not None:
+            new_population[0] = np.clip(np.asarray(best_x, dtype=int).reshape(-1), self.lb, self.ub)
 
         # 1. 随机注入
         if random_size > 0:
-            lb_val = self.lb[0] if isinstance(self.lb, np.ndarray) else self.lb
-            ub_val = self.ub[0] if isinstance(self.ub, np.ndarray) else self.ub
             random_individuals = np.random.randint(
                 lb_val, ub_val + 1,
                 size=(random_size, self.n_dim)
@@ -685,8 +699,6 @@ class MyGA:
         # 3. 基于地形的注入
         if terrain_size > 0 and resampled_dem is not None and self.low_res_shape is not None:
             terrain_start = elite_size + random_size + best_based_size
-            lb_val = self.lb[0] if isinstance(self.lb, np.ndarray) else self.lb
-            ub_val = self.ub[0] if isinstance(self.ub, np.ndarray) else self.ub
             initial_vector = _terrain_prior_vector(resampled_dem, self.low_res_shape, lb_val, ub_val)
 
             for i in range(terrain_start, self.size_pop):
@@ -883,10 +895,7 @@ def optimize_uplift_ga(obj_func, resampled_dem, LOW_RES_SHAPE, ORIGINAL_SHAPE,
 
         n_dim = LOW_RES_SHAPE[0] * LOW_RES_SHAPE[1]
         uplift_precision = _get_uplift_precision(ga_params)
-        encoded_lb = _encode_uplift_value(ga_params['lb'], uplift_precision)
-        encoded_ub = _encode_uplift_value(ga_params['ub'], uplift_precision)
-        if encoded_lb > encoded_ub:
-            raise ValueError(f"uplift_min 不能大于 uplift_max: {ga_params['lb']} > {ga_params['ub']}")
+        encoded_lb, encoded_ub = _encode_uplift_bounds(ga_params['lb'], ga_params['ub'], uplift_precision)
         lb_array = np.full(n_dim, encoded_lb)
         ub_array = np.full(n_dim, encoded_ub)
 
