@@ -42,11 +42,15 @@ from ga_lem_inverter.pipeline.preprocessing import interpolate_uplift_cv, unify_
 from ga_lem_inverter.pipeline.forward_model import (
     align_model_field,
     boundary_status_from_config,
+    fastscape_output_times,
+    normalize_stage_multipliers,
     run_fastscape_model,
     run_fastscape_series,
+    run_fastscape_time_scaled_series,
+    stage_edges_from_ma,
 )
 from ga_lem_inverter.pipeline.fitness import terrain_similarity
-from ga_lem_inverter.pipeline.optimization import optimize_uplift_ga
+from ga_lem_inverter.pipeline.optimization import optimize_uplift_ga, split_decoded_candidate
 from ga_lem_inverter.pipeline.erosion import create_erosion_field, display_erosion_field, verify_erosion_field
 from ga_lem_inverter.pipeline.visualization import (
     plot_comparison,
@@ -138,6 +142,283 @@ def _read_optimization_stages(config: configparser.ConfigParser) -> list[dict[st
         stages.append((section, stage))
     stages.sort(key=lambda item: item[0].lower())
     return [stage for _, stage in stages]
+
+
+def _config_float_list(config: configparser.ConfigParser, section: str, option: str, *, fallback: str) -> list[float]:
+    raw = config.get(section, option, fallback=fallback)
+    return [float(part.strip()) for part in raw.replace(";", ",").split(",") if part.strip()]
+
+
+def _read_uplift_history_config(config: configparser.ConfigParser, *, time_total_years: float) -> dict[str, Any]:
+    enabled = _config_bool(config, "UpliftHistory", "enabled", fallback=False)
+    if not enabled:
+        return {"enabled": False}
+    mode = config.get("UpliftHistory", "mode", fallback="stage_multiplier").strip().lower()
+    if mode != "stage_multiplier":
+        raise UserConfigError("[UpliftHistory] mode 当前只支持 stage_multiplier。")
+    stage_times = _config_float_list(config, "UpliftHistory", "stage_times_ma", fallback=f"{time_total_years / 1e6},0")
+    try:
+        stage_edges = stage_edges_from_ma(stage_times, time_total_years=time_total_years)
+    except ValueError as exc:
+        raise UserConfigError(f"[UpliftHistory] stage_times_ma 配置错误: {exc}") from exc
+    stage_count = len(stage_times) - 1
+    if stage_count < 1:
+        raise UserConfigError("[UpliftHistory] stage_times_ma 至少需要形成一个阶段。")
+    multiplier_min = config.getfloat("UpliftHistory", "multiplier_min", fallback=0.5)
+    multiplier_max = config.getfloat("UpliftHistory", "multiplier_max", fallback=1.5)
+    multiplier_precision = config.getfloat("UpliftHistory", "multiplier_precision", fallback=0.1)
+    if multiplier_min <= 0 or multiplier_max < multiplier_min:
+        raise UserConfigError("[UpliftHistory] multiplier_min/max 必须为正且 min <= max。")
+    if multiplier_precision <= 0:
+        raise UserConfigError("[UpliftHistory] multiplier_precision 必须大于 0。")
+    return {
+        "enabled": True,
+        "mode": mode,
+        "stage_times_ma": stage_times,
+        "stage_edges_years": stage_edges,
+        "stage_count": stage_count,
+        "multiplier_min": multiplier_min,
+        "multiplier_max": multiplier_max,
+        "multiplier_precision": multiplier_precision,
+        "normalize_time_weighted_mean": _config_bool(
+            config,
+            "UpliftHistory",
+            "normalize_time_weighted_mean",
+            fallback=True,
+        ),
+    }
+
+
+def _normalized_stage_multipliers(stage_multipliers: np.ndarray | None, uplift_history: dict[str, Any]) -> np.ndarray | None:
+    if not uplift_history.get("enabled"):
+        return None
+    if stage_multipliers is None:
+        stage_multipliers = np.ones(int(uplift_history["stage_count"]), dtype=float)
+    return normalize_stage_multipliers(
+        stage_multipliers,
+        uplift_history["stage_edges_years"],
+        enabled=bool(uplift_history.get("normalize_time_weighted_mean", True)),
+    )
+
+
+def _run_candidate_fastscape_series(
+    *,
+    k_sp,
+    uplift,
+    k_diff,
+    x_size,
+    y_size,
+    spacing,
+    boundary_status,
+    area_exp,
+    slope_exp,
+    time_total,
+    output_steps,
+    uplift_history,
+    stage_multipliers=None,
+):
+    output_times = fastscape_output_times(time_total, output_steps)
+    multipliers = _normalized_stage_multipliers(stage_multipliers, uplift_history)
+    if multipliers is None:
+        topography_series = run_fastscape_series(
+            k_sp=k_sp,
+            uplift=uplift,
+            k_diff=k_diff,
+            x_size=x_size,
+            y_size=y_size,
+            spacing=spacing,
+            boundary_status=boundary_status,
+            area_exp=area_exp,
+            slope_exp=slope_exp,
+            time_total=time_total,
+            output_steps=output_steps,
+        )
+        uplift_series = np.repeat(uplift[np.newaxis, :, :], len(topography_series), axis=0)
+        return topography_series, uplift_series, None, output_times
+    result = run_fastscape_time_scaled_series(
+        k_sp=k_sp,
+        uplift=uplift,
+        k_diff=k_diff,
+        x_size=x_size,
+        y_size=y_size,
+        spacing=spacing,
+        boundary_status=boundary_status,
+        area_exp=area_exp,
+        slope_exp=slope_exp,
+        time_total=time_total,
+        output_steps=output_steps,
+        stage_edges_years=uplift_history["stage_edges_years"],
+        stage_multipliers=multipliers,
+    )
+    return result.topography_series, result.uplift_series, multipliers, result.output_times
+
+
+def _plot_uplift_history_summary(
+    *,
+    stage_uplift: np.ndarray,
+    cumulative_stage_uplift: np.ndarray,
+    stage_times_ma: list[float],
+    stage_multipliers: np.ndarray,
+    output_path: Path,
+    context: RunContext,
+) -> None:
+    """Save a compact visual summary of the optimized stage uplift history."""
+    n_stage = int(stage_uplift.shape[0])
+    cumulative_stage_uplift_km = cumulative_stage_uplift / 1000.0
+    fig, axes = plt.subplots(2, n_stage + 1, figsize=(4 * (n_stage + 1), 7), constrained_layout=True)
+    if axes.ndim == 1:
+        axes = axes.reshape(2, -1)
+
+    x = np.arange(n_stage)
+    labels = [f"{stage_times_ma[i]:g}-{stage_times_ma[i + 1]:g} Ma" for i in range(n_stage)]
+    axes[0, 0].plot(x, stage_multipliers, marker="o", color="#1f77b4", linewidth=2)
+    axes[0, 0].axhline(1.0, color="0.4", linestyle="--", linewidth=1)
+    axes[0, 0].set_xticks(x)
+    axes[0, 0].set_xticklabels(labels, rotation=25, ha="right")
+    axes[0, 0].set_ylabel("Multiplier")
+    axes[0, 0].set_title("Stage multipliers")
+    axes[0, 0].grid(True, alpha=0.25)
+
+    total_cumulative = np.sum(cumulative_stage_uplift_km, axis=0)
+    im = axes[1, 0].imshow(flipped_display_array(total_cumulative), cmap="magma", origin="upper")
+    axes[1, 0].set_title("Cumulative uplift (km)")
+    axes[1, 0].set_axis_off()
+    fig.colorbar(im, ax=axes[1, 0], shrink=0.8)
+
+    rate_vmin = float(np.nanmin(stage_uplift))
+    rate_vmax = float(np.nanmax(stage_uplift))
+    cum_vmin = float(np.nanmin(cumulative_stage_uplift_km))
+    cum_vmax = float(np.nanmax(cumulative_stage_uplift_km))
+    if rate_vmin == rate_vmax:
+        rate_vmax = rate_vmin + 1.0
+    if cum_vmin == cum_vmax:
+        cum_vmax = cum_vmin + 1.0
+
+    rate_im = None
+    cum_im = None
+    for idx in range(n_stage):
+        title = labels[idx]
+        rate_im = axes[0, idx + 1].imshow(
+            flipped_display_array(stage_uplift[idx]),
+            cmap="RdBu_r",
+            origin="upper",
+            vmin=rate_vmin,
+            vmax=rate_vmax,
+        )
+        axes[0, idx + 1].set_title(f"{title}\nrate mm/yr")
+        axes[0, idx + 1].set_axis_off()
+
+        cum_im = axes[1, idx + 1].imshow(
+            flipped_display_array(cumulative_stage_uplift_km[idx]),
+            cmap="magma",
+            origin="upper",
+            vmin=cum_vmin,
+            vmax=cum_vmax,
+        )
+        axes[1, idx + 1].set_title(f"{title}\ncumulative mm")
+        axes[1, idx + 1].set_axis_off()
+
+    if rate_im is not None:
+        fig.colorbar(rate_im, ax=axes[0, 1:].ravel().tolist(), shrink=0.8, label="Uplift rate (mm/yr)")
+    if cum_im is not None:
+        fig.colorbar(cum_im, ax=axes[1, 1:].ravel().tolist(), shrink=0.8, label="Cumulative uplift (km)")
+
+    fig.suptitle("Optimized uplift history", fontsize=14)
+    fig.savefig(output_path, dpi=200)
+    context.add_artifact(output_path)
+    plt.close(fig)
+
+
+def _plot_topography_history_summary(
+    *,
+    topography_series: np.ndarray,
+    output_path: Path,
+    context: RunContext,
+    output_times_years: np.ndarray | None = None,
+    total_time_years: float | None = None,
+    max_frames: int = 6,
+) -> None:
+    """Save final-solution FastScape topography snapshots and elevation change."""
+    series = np.asarray(topography_series, dtype=float)
+    if series.ndim != 3 or series.shape[0] < 2:
+        logging.warning("跳过地形演化图：topography_series 需要 shape=(time,y,x)，当前 %s", series.shape)
+        return
+
+    finite = series[np.isfinite(series)]
+    if finite.size == 0:
+        logging.warning("跳过地形演化图：topography_series 没有有效数值。")
+        return
+
+    n_frames = min(max(2, int(max_frames)), series.shape[0])
+    frame_indices = np.unique(np.linspace(0, series.shape[0] - 1, n_frames, dtype=int))
+    n_frames = len(frame_indices)
+    output_times = None
+    if output_times_years is not None:
+        output_times = np.asarray(output_times_years, dtype=float).reshape(-1)
+        if output_times.size != series.shape[0]:
+            logging.warning(
+                "地形演化时间标签数量与 topography_series 不一致: %s != %s，将退回 frame 标签。",
+                output_times.size,
+                series.shape[0],
+            )
+            output_times = None
+
+    def _frame_label(frame_idx: int) -> str:
+        if output_times is None or total_time_years is None:
+            return "final" if frame_idx == series.shape[0] - 1 else f"frame {frame_idx + 1}"
+        ma_before_present = max(0.0, (float(total_time_years) - float(output_times[frame_idx])) / 1.0e6)
+        if frame_idx == series.shape[0] - 1 or ma_before_present < 1e-9:
+            return "0 Ma"
+        return f"{ma_before_present:g} Ma"
+
+    vmin, vmax = np.nanpercentile(finite, [2, 98])
+    if not np.isfinite(vmin) or not np.isfinite(vmax) or vmin == vmax:
+        vmin = float(np.nanmin(finite))
+        vmax = float(np.nanmax(finite))
+
+    delta_series = series - series[0]
+    finite_delta = delta_series[np.isfinite(delta_series)]
+    delta_limit = float(np.nanpercentile(np.abs(finite_delta), 98)) if finite_delta.size else 1.0
+    if not np.isfinite(delta_limit) or delta_limit <= 0:
+        delta_limit = 1.0
+
+    fig, axes = plt.subplots(2, n_frames, figsize=(4 * n_frames, 7), constrained_layout=True)
+    if n_frames == 1:
+        axes = axes.reshape(2, 1)
+
+    terrain_im = None
+    delta_im = None
+    for col_idx, frame_idx in enumerate(frame_indices):
+        label = _frame_label(frame_idx)
+        terrain_im = axes[0, col_idx].imshow(
+            flipped_display_array(series[frame_idx]),
+            cmap="terrain",
+            origin="upper",
+            vmin=vmin,
+            vmax=vmax,
+        )
+        axes[0, col_idx].set_title(f"{label}\nelevation")
+        axes[0, col_idx].set_axis_off()
+
+        delta_im = axes[1, col_idx].imshow(
+            flipped_display_array(delta_series[frame_idx]),
+            cmap="RdBu_r",
+            origin="upper",
+            vmin=-delta_limit,
+            vmax=delta_limit,
+        )
+        axes[1, col_idx].set_title(f"{label}\nchange from first")
+        axes[1, col_idx].set_axis_off()
+
+    if terrain_im is not None:
+        fig.colorbar(terrain_im, ax=axes[0, :].ravel().tolist(), shrink=0.8, label="Elevation (m)")
+    if delta_im is not None:
+        fig.colorbar(delta_im, ax=axes[1, :].ravel().tolist(), shrink=0.8, label="Elevation change (m)")
+
+    fig.suptitle("FastScape topography evolution for best solution", fontsize=14)
+    fig.savefig(output_path, dpi=200)
+    context.add_artifact(output_path)
+    plt.close(fig)
 
 
 def _load_json_metrics(path: Path) -> dict[str, Any]:
@@ -262,10 +543,12 @@ def create_objective_function(resampled_dem, LOW_RES_SHAPE, ORIGINAL_SHAPE,
                            total_simulation_time, terrain_resolution,
                            feature_smooth_radius, boundary_status='fixed_value',
                            area_exp=0.43, slope_exp=1, use_lpips=True,
-                           pecube_evaluator=None, pecube_time_steps=2):
+                           pecube_evaluator=None, pecube_time_steps=2,
+                           uplift_history=None):
     """创建优化目标函数"""
     def objective_function(uplift_vector):
         try:
+            uplift_vector, stage_multipliers = split_decoded_candidate(uplift_vector)
             # 重塑隆升率向量
             uplift_vector = np.array(uplift_vector).reshape(LOW_RES_SHAPE)
 
@@ -274,8 +557,10 @@ def create_objective_function(resampled_dem, LOW_RES_SHAPE, ORIGINAL_SHAPE,
 
             # 运行Fastscape模型
             topography_series = None
-            if pecube_evaluator is not None and pecube_evaluator.enabled:
-                topography_series = run_fastscape_series(
+            uplift_series = None
+            history_enabled = bool((uplift_history or {}).get("enabled"))
+            if (pecube_evaluator is not None and pecube_evaluator.enabled) or history_enabled:
+                topography_series, uplift_series, _, _ = _run_candidate_fastscape_series(
                     k_sp=Ksp,
                     uplift=full_res_uplift,
                     k_diff=D_DIFF,
@@ -286,7 +571,9 @@ def create_objective_function(resampled_dem, LOW_RES_SHAPE, ORIGINAL_SHAPE,
                     area_exp=area_exp,
                     slope_exp=slope_exp,
                     time_total=total_simulation_time,
-                    output_steps=max(2, pecube_time_steps),
+                    output_steps=max(2, pecube_time_steps if pecube_evaluator is not None and pecube_evaluator.enabled else 2),
+                    uplift_history=uplift_history or {"enabled": False},
+                    stage_multipliers=stage_multipliers,
                 )
                 generated_elevation = topography_series[-1]
             else:
@@ -314,7 +601,6 @@ def create_objective_function(resampled_dem, LOW_RES_SHAPE, ORIGINAL_SHAPE,
 
             terrain_loss = 1 - similarity  # 最小化不相似度
             if pecube_evaluator is not None and pecube_evaluator.enabled:
-                uplift_series = np.repeat(full_res_uplift[np.newaxis, :, :], len(topography_series), axis=0)
                 result = pecube_evaluator.evaluate(
                     terrain_loss=terrain_loss,
                     generated_dem=generated_elevation,
@@ -812,6 +1098,7 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
         D_DIFF = config.getfloat('Model', 'd_diff_value')
         time_step_num = 101  # 可以添加到config文件中
         total_simulation_time = config.getfloat('Model', 'time_total')
+        uplift_history = _read_uplift_history_config(config, time_total_years=total_simulation_time)
         terrain_resolution = spacing # 可以添加到config文件中
         feature_smooth_radius = 2  # 可以添加到config文件中
         use_lpips = config.getboolean('Fitness', 'use_lpips', fallback=True)
@@ -842,6 +1129,14 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
             'mutation_stagnation_multiplier': _config_float(config, 'Optimization', 'mutation_stagnation_multiplier', fallback=1.5),
             'diagnostics_dir': str(context.root),
         }
+        if uplift_history.get("enabled"):
+            ga_params.update({
+                "uplift_history_enabled": True,
+                "uplift_history_stage_count": uplift_history["stage_count"],
+                "uplift_history_multiplier_min": uplift_history["multiplier_min"],
+                "uplift_history_multiplier_max": uplift_history["multiplier_max"],
+                "uplift_history_multiplier_precision": uplift_history["multiplier_precision"],
+            })
         stages = _read_optimization_stages(config)
         if stages:
             ga_params['stages'] = stages
@@ -905,6 +1200,7 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
             use_lpips=use_lpips,
             pecube_evaluator=pecube_evaluator,
             pecube_time_steps=pecube_time_steps,
+            uplift_history=uplift_history,
         )
 
         total_time_ma = total_simulation_time / 1_000_000.0
@@ -998,9 +1294,13 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
         )
 
         if best_uplift is not None:
-            best_low_res_uplift = best_uplift.reshape(LOW_RES_SHAPE)
+            best_uplift_vector, best_stage_multipliers = split_decoded_candidate(best_uplift)
+            best_stage_multipliers = _normalized_stage_multipliers(best_stage_multipliers, uplift_history)
+            best_low_res_uplift = best_uplift_vector.reshape(LOW_RES_SHAPE)
             best_full_res_uplift = interpolate_uplift_cv(best_low_res_uplift, ORIGINAL_SHAPE)
             logging.info(f"Best fitness: {best_fitness}")
+            if best_stage_multipliers is not None:
+                logging.info("Best uplift-history multipliers: %s", best_stage_multipliers)
 
             # 6. 绘制优化历史
             if fitness_history is not None:
@@ -1036,7 +1336,9 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
         # 6. 结果处理和可视化
         logging.info("Step 5: 结果处理和可视化")
         if best_uplift is not None:
-            best_low_res_uplift = best_uplift.reshape(LOW_RES_SHAPE)
+            best_uplift_vector, best_stage_multipliers = split_decoded_candidate(best_uplift)
+            best_stage_multipliers = _normalized_stage_multipliers(best_stage_multipliers, uplift_history)
+            best_low_res_uplift = best_uplift_vector.reshape(LOW_RES_SHAPE)
             best_full_res_uplift = interpolate_uplift_cv(best_low_res_uplift, ORIGINAL_SHAPE)
             display_low_res_uplift = flipped_display_array(best_low_res_uplift)
             display_full_res_uplift = flipped_display_array(best_full_res_uplift)
@@ -1110,7 +1412,28 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
                     logging.warning(f"读取 demo 真值 uplift 失败，跳过对比: {e}")
 
             # 生成最终地形
-            final_elevation = run_fastscape_model(
+            final_output_times_years = None
+            if uplift_history.get("enabled"):
+                final_series_for_output, best_uplift_series, best_stage_multipliers, final_output_times_years = _run_candidate_fastscape_series(
+                    k_sp=rotated_Ksp,
+                    uplift=best_full_res_uplift,
+                    k_diff=D_DIFF,
+                    x_size=col,
+                    y_size=row,
+                    spacing=spacing,
+                    boundary_status=model_params['boundary_status'],
+                    area_exp=config.getfloat('Model', 'area_exp'),
+                    slope_exp=config.getfloat('Model', 'slope_exp'),
+                    time_total=total_simulation_time,
+                    output_steps=max(2, pecube_time_steps),
+                    uplift_history=uplift_history,
+                    stage_multipliers=best_stage_multipliers,
+                )
+                final_elevation = final_series_for_output[-1]
+            else:
+                best_uplift_series = None
+                final_series_for_output = None
+                final_elevation = run_fastscape_model(
                     k_sp=rotated_Ksp, # 使用旋转后的 Ksp
                     uplift=best_full_res_uplift,
                     k_diff=D_DIFF,
@@ -1121,10 +1444,16 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
                     area_exp=config.getfloat('Model', 'area_exp'),
                     slope_exp=config.getfloat('Model', 'slope_exp'),
                     time_total=total_simulation_time
-            )
+                )
             final_elevation_cropped = crop_output_border(final_elevation, safe_border)
             target_dem_cropped = crop_output_border(resampled_dem, safe_border)
             best_full_res_uplift_cropped = crop_output_border(best_full_res_uplift, safe_border)
+            topography_series_cropped = None
+            if final_series_for_output is not None:
+                topography_series_cropped = np.asarray([
+                    crop_output_border(frame, safe_border)
+                    for frame in final_series_for_output
+                ])
             display_final_elevation = flipped_display_array(final_elevation_cropped)
             display_target_dem = flipped_display_array(target_dem_cropped)
             display_full_res_uplift_cropped = flipped_display_array(best_full_res_uplift_cropped)
@@ -1150,6 +1479,19 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
                 'cropped_output_rows': int(final_elevation_cropped.shape[0]),
                 'cropped_output_cols': int(final_elevation_cropped.shape[1]),
             })
+            if best_stage_multipliers is not None:
+                demo_metrics["uplift_history_enabled"] = 1.0
+                for idx, multiplier in enumerate(best_stage_multipliers, start=1):
+                    demo_metrics[f"uplift_history_m{idx}"] = float(multiplier)
+                for idx, duration in enumerate(np.diff(uplift_history["stage_edges_years"]) / 1e6, start=1):
+                    demo_metrics[f"uplift_history_duration_ma_{idx}"] = float(duration)
+                if final_output_times_years is not None:
+                    for idx, time_years in enumerate(final_output_times_years, start=1):
+                        demo_metrics[f"topography_output_time_ma_before_present_{idx}"] = float(
+                            max(0.0, (total_simulation_time - time_years) / 1e6)
+                        )
+            else:
+                demo_metrics["uplift_history_enabled"] = 0.0
             logging.info(
                 "Terrain metrics: "
                 f"Pearson={terrain_pearson:.4f}, "
@@ -1162,19 +1504,25 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
                     metrics_file.write(f"{key} = {value:.6f}\n")
             context.add_artifact(metrics_txt_path)
             if pecube_evaluator.enabled:
-                final_series = run_fastscape_series(
-                    k_sp=rotated_Ksp,
-                    uplift=best_full_res_uplift,
-                    k_diff=D_DIFF,
-                    x_size=col,
-                    y_size=row,
-                    spacing=spacing,
-                    boundary_status=model_params['boundary_status'],
-                    area_exp=config.getfloat('Model', 'area_exp'),
-                    slope_exp=config.getfloat('Model', 'slope_exp'),
-                    time_total=total_simulation_time,
-                    output_steps=max(2, pecube_time_steps),
-                )
+                if final_series_for_output is None:
+                    final_series, final_uplift_series, _, final_output_times_years = _run_candidate_fastscape_series(
+                        k_sp=rotated_Ksp,
+                        uplift=best_full_res_uplift,
+                        k_diff=D_DIFF,
+                        x_size=col,
+                        y_size=row,
+                        spacing=spacing,
+                        boundary_status=model_params['boundary_status'],
+                        area_exp=config.getfloat('Model', 'area_exp'),
+                        slope_exp=config.getfloat('Model', 'slope_exp'),
+                        time_total=total_simulation_time,
+                        output_steps=max(2, pecube_time_steps),
+                        uplift_history=uplift_history,
+                        stage_multipliers=best_stage_multipliers,
+                    )
+                else:
+                    final_series = final_series_for_output
+                    final_uplift_series = best_uplift_series
                 final_terrain_loss = 1 - terrain_similarity(
                     matrix1=resampled_dem,
                     matrix2=final_series[-1],
@@ -1187,7 +1535,7 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
                     generated_dem=final_series[-1],
                     uplift=best_full_res_uplift,
                     topography_series=final_series,
-                    uplift_series=np.repeat(best_full_res_uplift[np.newaxis, :, :], len(final_series), axis=0),
+                    uplift_series=final_uplift_series,
                     force=True,
                     force_best=True,
                 )
@@ -1243,6 +1591,35 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
             context.add_artifact(figure_path)
             plt.close()
 
+            stage_uplift_cropped = None
+            cumulative_stage_uplift_cropped = None
+            if best_stage_multipliers is not None:
+                stage_uplift_cropped = np.asarray([
+                    best_full_res_uplift_cropped * multiplier
+                    for multiplier in best_stage_multipliers
+                ])
+                durations_ma = np.diff(uplift_history["stage_edges_years"]) / 1e6
+                cumulative_stage_uplift_cropped = np.asarray([
+                    stage_uplift_cropped[idx] * durations_ma[idx]
+                    for idx in range(len(durations_ma))
+                ])
+                _plot_uplift_history_summary(
+                    stage_uplift=stage_uplift_cropped,
+                    cumulative_stage_uplift=cumulative_stage_uplift_cropped,
+                    stage_times_ma=uplift_history["stage_times_ma"],
+                    stage_multipliers=best_stage_multipliers,
+                    output_path=context.figure_path("uplift_history_summary.png"),
+                    context=context,
+                )
+            if topography_series_cropped is not None:
+                _plot_topography_history_summary(
+                    topography_series=topography_series_cropped,
+                    output_times_years=final_output_times_years,
+                    total_time_years=total_simulation_time,
+                    output_path=context.figure_path("topography_history_summary.png"),
+                    context=context,
+                )
+
             # 绘制3D地形可视化
             fig_3d = plot_3d_surface(
                 data=display_final_elevation,
@@ -1262,6 +1639,11 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
                     'target_dem': target_dem_cropped,
                     'best_full_res_uplift_raw': best_full_res_uplift,
                     'final_elevation_raw': final_elevation,
+                    'stage_uplift': stage_uplift_cropped,
+                    'cumulative_stage_uplift': cumulative_stage_uplift_cropped,
+                    'stage_multipliers': best_stage_multipliers,
+                    'topography_series': topography_series_cropped,
+                    'topography_output_times_years': final_output_times_years,
                     'fitness_history': np.array(fitness_history) if fitness_history is not None else None
                 }
             save_optimization_results(arrays_dir, results, context)

@@ -106,6 +106,61 @@ def _decode_uplift_vector(encoded_vector, precision):
     return np.asarray(encoded_vector, dtype=float) * precision
 
 
+def _get_history_settings(ga_params):
+    """Resolve optional low-dimensional uplift-history encoding settings."""
+    enabled = _as_bool(ga_params.get("uplift_history_enabled"), False)
+    count = int(ga_params.get("uplift_history_stage_count", 0) or 0)
+    if not enabled:
+        return {
+            "enabled": False,
+            "stage_count": 0,
+            "precision": 0.1,
+            "encoded_lb": np.empty(0, dtype=int),
+            "encoded_ub": np.empty(0, dtype=int),
+        }
+    if count < 1:
+        raise ValueError("启用 uplift history 时，uplift_history_stage_count 必须 >= 1。")
+    precision = float(ga_params.get("uplift_history_multiplier_precision", 0.1))
+    if precision <= 0:
+        raise ValueError(f"uplift_history_multiplier_precision 必须大于 0，当前为 {precision}")
+    multiplier_min = ga_params.get("uplift_history_multiplier_min", 0.5)
+    multiplier_max = ga_params.get("uplift_history_multiplier_max", 1.5)
+    lb = np.asarray(multiplier_min if isinstance(multiplier_min, (list, tuple, np.ndarray)) else [multiplier_min] * count, dtype=float)
+    ub = np.asarray(multiplier_max if isinstance(multiplier_max, (list, tuple, np.ndarray)) else [multiplier_max] * count, dtype=float)
+    if lb.size != count or ub.size != count:
+        raise ValueError("uplift history multiplier_min/max 数量必须等于 stage_count。")
+    encoded_lb = np.asarray([_encode_uplift_bounds(l, u, precision)[0] for l, u in zip(lb, ub)], dtype=int)
+    encoded_ub = np.asarray([_encode_uplift_bounds(l, u, precision)[1] for l, u in zip(lb, ub)], dtype=int)
+    return {
+        "enabled": True,
+        "stage_count": count,
+        "precision": precision,
+        "encoded_lb": encoded_lb,
+        "encoded_ub": encoded_ub,
+    }
+
+
+def _decode_candidate_vector(encoded_vector, *, uplift_dim, uplift_precision, history_settings):
+    """Decode a mixed chromosome into real uplift plus optional multipliers."""
+    encoded = np.asarray(encoded_vector, dtype=float).reshape(-1)
+    uplift = _decode_uplift_vector(encoded[:uplift_dim], uplift_precision)
+    if not history_settings["enabled"]:
+        return uplift
+    stage_count = history_settings["stage_count"]
+    multipliers = encoded[uplift_dim:uplift_dim + stage_count] * history_settings["precision"]
+    return {
+        "uplift": uplift,
+        "stage_multipliers": np.asarray(multipliers, dtype=float),
+    }
+
+
+def split_decoded_candidate(candidate):
+    """Return ``(uplift_vector, stage_multipliers_or_none)`` from GA output."""
+    if isinstance(candidate, dict):
+        return np.asarray(candidate["uplift"], dtype=float), np.asarray(candidate["stage_multipliers"], dtype=float)
+    return np.asarray(candidate, dtype=float), None
+
+
 def _safe_int_bounds(lb, ub):
     lb_array = np.asarray(lb).reshape(-1)
     ub_array = np.asarray(ub).reshape(-1)
@@ -116,14 +171,27 @@ def _safe_int_bounds(lb, ub):
     return lb_val, ub_val
 
 
-def _terrain_prior_vector(matrix, low_res_shape, lb, ub):
+def _terrain_prior_vector(matrix, low_res_shape, lb, ub, n_dim=None):
     """把 DEM 安全映射成 GA 整数编码 prior；平坦或异常 DEM 退化为中值场。"""
-    lb_val, ub_val = _safe_int_bounds(lb, ub)
+    lb_array = np.asarray(lb).reshape(-1)
+    ub_array = np.asarray(ub).reshape(-1)
+    spatial_dim = int(np.prod(low_res_shape))
+    if n_dim is None:
+        n_dim = spatial_dim
+    if lb_array.size == 1:
+        lb_val = int(round(float(lb_array[0])))
+    else:
+        lb_val = int(round(float(lb_array[:spatial_dim][0])))
+    if ub_array.size == 1:
+        ub_val = int(round(float(ub_array[0])))
+    else:
+        ub_val = int(round(float(ub_array[:spatial_dim][0])))
     midpoint = int(round((lb_val + ub_val) / 2))
 
     terrain = np.asarray(matrix, dtype=float)
     if terrain.size == 0 or not np.isfinite(terrain).any():
-        return np.full(int(np.prod(low_res_shape)), midpoint, dtype=int)
+        spatial = np.full(spatial_dim, midpoint, dtype=int)
+        return _append_default_tail(spatial, lb, ub, n_dim)
 
     finite_values = terrain[np.isfinite(terrain)]
     fill_value = float(np.nanmedian(finite_values))
@@ -144,16 +212,41 @@ def _terrain_prior_vector(matrix, low_res_shape, lb, ub):
     max_val = float(np.nanmax(smoothed_matrix))
     value_range = max_val - min_val
     if not np.isfinite(value_range) or value_range <= 1e-12:
-        return np.full(int(np.prod(low_res_shape)), midpoint, dtype=int)
+        spatial = np.full(spatial_dim, midpoint, dtype=int)
+        return _append_default_tail(spatial, lb, ub, n_dim)
 
     scaled_matrix = (smoothed_matrix - min_val) / value_range
     scaled_matrix = lb_val + (ub_val - lb_val) * scaled_matrix
-    return np.clip(np.rint(scaled_matrix), lb_val, ub_val).astype(int).flatten()
+    spatial = np.clip(np.rint(scaled_matrix), lb_val, ub_val).astype(int).flatten()
+    return _append_default_tail(spatial, lb, ub, n_dim)
+
+
+def _append_default_tail(spatial_vector, lb, ub, n_dim):
+    spatial_vector = np.asarray(spatial_vector, dtype=int).reshape(-1)
+    n_dim = int(n_dim)
+    if spatial_vector.size >= n_dim:
+        return spatial_vector[:n_dim]
+    lb_array = np.asarray(lb).reshape(-1)
+    ub_array = np.asarray(ub).reshape(-1)
+    if lb_array.size == 1:
+        lb_tail = np.full(n_dim - spatial_vector.size, int(round(float(lb_array[0]))), dtype=int)
+    else:
+        lb_tail = np.rint(lb_array[spatial_vector.size:n_dim]).astype(int)
+    if ub_array.size == 1:
+        ub_tail = np.full(n_dim - spatial_vector.size, int(round(float(ub_array[0]))), dtype=int)
+    else:
+        ub_tail = np.rint(ub_array[spatial_vector.size:n_dim]).astype(int)
+    tail = np.rint((lb_tail + ub_tail) / 2).astype(int)
+    return np.concatenate([spatial_vector, tail])
 
 
 def _smooth_random_population(count, n_dim, low_res_shape, lb, ub):
     """生成平滑随机场个体，作为非 DEM prior 的空间结构初始化。"""
-    lb_val, ub_val = _safe_int_bounds(lb, ub)
+    spatial_dim = int(np.prod(low_res_shape))
+    lb_array = np.asarray(lb).reshape(-1)
+    ub_array = np.asarray(ub).reshape(-1)
+    lb_val = int(round(float(lb_array[0])))
+    ub_val = int(round(float(ub_array[0])))
     if count <= 0:
         return np.empty((0, n_dim), dtype=int)
 
@@ -167,7 +260,8 @@ def _smooth_random_population(count, n_dim, low_res_shape, lb, ub):
         else:
             scaled = (field - min_val) / (max_val - min_val)
             scaled = lb_val + (ub_val - lb_val) * scaled
-        individuals[i, :] = np.clip(np.rint(scaled), lb_val, ub_val).astype(int).flatten()
+        spatial = np.clip(np.rint(scaled), lb_val, ub_val).astype(int).flatten()
+        individuals[i, :] = _append_default_tail(spatial, lb, ub, n_dim)
     return individuals
 
 class MyGA:
@@ -242,6 +336,7 @@ class MyGA:
         self.X = None  # 种群的表现型
         self.Y = None  # 种群的适应度
         self.low_res_shape = None  # 低分辨率形状
+        self.spatial_dim = n_dim
 
         # 记录最优解
         self.best_x = None
@@ -288,10 +383,12 @@ class MyGA:
         - noise_level: 添加随机噪声的级别
         - random_fraction: 随机初始化的比例
         """
-        if low_res_shape is None or np.prod(low_res_shape) != self.n_dim:
-            raise ValueError(f"Invalid low_res_shape: {low_res_shape}. Expected product to be {self.n_dim}")
+        spatial_dim = int(np.prod(low_res_shape)) if low_res_shape is not None else 0
+        if low_res_shape is None or spatial_dim > self.n_dim or spatial_dim < 1:
+            raise ValueError(f"Invalid low_res_shape: {low_res_shape}. Expected product <= {self.n_dim}")
 
         self.low_res_shape = low_res_shape
+        self.spatial_dim = spatial_dim
         random_pop_size = int(self.size_pop * random_fraction)
         smooth_random_pop_size = max(1, int(self.size_pop * 0.2)) if self.size_pop >= 3 else 0
         terrain_pop_size = self.size_pop - random_pop_size - smooth_random_pop_size
@@ -299,16 +396,20 @@ class MyGA:
             terrain_pop_size = 0
             smooth_random_pop_size = self.size_pop - random_pop_size
         initial_population = np.zeros((self.size_pop, self.n_dim), dtype=int)
-        lb_val, ub_val = _safe_int_bounds(lb, ub)
+        lb_array = np.asarray(lb).reshape(-1)
+        ub_array = np.asarray(ub).reshape(-1)
+        lb_val = int(round(float(lb_array[0])))
+        ub_val = int(round(float(ub_array[0])))
 
         if terrain_pop_size > 0:
-            initial_vector = _terrain_prior_vector(matrix, low_res_shape, lb_val, ub_val)
+            initial_vector = _terrain_prior_vector(matrix, low_res_shape, lb, ub, n_dim=self.n_dim)
             terrain_individuals = np.zeros((terrain_pop_size, self.n_dim), dtype=int)
 
             for i in range(terrain_pop_size):
-                noise = np.random.randint(-noise_level, noise_level + 1, size=self.n_dim)
+                noise = np.zeros(self.n_dim, dtype=int)
+                noise[:spatial_dim] = np.random.randint(-noise_level, noise_level + 1, size=spatial_dim)
                 individual = initial_vector + noise
-                individual = np.clip(individual, lb_val, ub_val)
+                individual = np.clip(individual, self.lb, self.ub)
                 terrain_individuals[i, :] = individual
 
             initial_population[:terrain_pop_size, :] = terrain_individuals
@@ -320,14 +421,14 @@ class MyGA:
                 smooth_random_pop_size,
                 self.n_dim,
                 low_res_shape,
-                lb_val,
-                ub_val
+                lb,
+                ub
             )
 
         if random_pop_size > 0:
             random_individuals = np.random.randint(
-                lb_val,
-                ub_val + 1,
+                self.lb,
+                self.ub + 1,
                 size=(random_pop_size, self.n_dim)
             )
             initial_population[smooth_end:, :] = random_individuals
@@ -519,16 +620,25 @@ class MyGA:
         np.random.shuffle(self.Chrom)
         for i in range(0, self.size_pop - 1, 2):
             if np.random.rand() < self.prob_cross:
-                # 将染色体重塑为2D矩阵
-                parent1 = self.Chrom[i].reshape(self.low_res_shape)
-                parent2 = self.Chrom[i + 1].reshape(self.low_res_shape)
+                spatial_dim = int(np.prod(self.low_res_shape))
+                parent1_tail = self.Chrom[i, spatial_dim:].copy()
+                parent2_tail = self.Chrom[i + 1, spatial_dim:].copy()
+                parent1 = self.Chrom[i, :spatial_dim].reshape(self.low_res_shape)
+                parent2 = self.Chrom[i + 1, :spatial_dim].reshape(self.low_res_shape)
 
                 # 生成新后代
                 child1, child2 = self.spatial_crossover(parent1, parent2)
+                if parent1_tail.size:
+                    tail_mask = np.random.rand(parent1_tail.size) < 0.5
+                    child1_tail = np.where(tail_mask, parent1_tail, parent2_tail)
+                    child2_tail = np.where(tail_mask, parent2_tail, parent1_tail)
+                else:
+                    child1_tail = parent1_tail
+                    child2_tail = parent2_tail
 
                 # 将后代展平并存回种群
-                self.Chrom[i] = child1.flatten()
-                self.Chrom[i + 1] = child2.flatten()
+                self.Chrom[i] = np.concatenate([child1.flatten(), child1_tail])
+                self.Chrom[i + 1] = np.concatenate([child2.flatten(), child2_tail])
 
     def get_adaptive_mutation_prob(self):
         """
@@ -645,7 +755,7 @@ class MyGA:
         lb_val, ub_val = _safe_int_bounds(self.lb, self.ub)
 
         # 创建新种群。先填充合法随机个体，避免不可用策略留下越界 0 值。
-        new_population = np.random.randint(lb_val, ub_val + 1, size=(self.size_pop, self.n_dim))
+        new_population = np.random.randint(self.lb, self.ub + 1, size=(self.size_pop, self.n_dim))
         new_population[:elite_size] = elites
         if best_x is not None:
             new_population[0] = np.clip(np.asarray(best_x, dtype=int).reshape(-1), self.lb, self.ub)
@@ -653,7 +763,7 @@ class MyGA:
         # 1. 随机注入
         if random_size > 0:
             random_individuals = np.random.randint(
-                lb_val, ub_val + 1,
+                self.lb, self.ub + 1,
                 size=(random_size, self.n_dim)
             )
             new_population[elite_size:elite_size+random_size] = random_individuals
@@ -699,14 +809,16 @@ class MyGA:
         # 3. 基于地形的注入
         if terrain_size > 0 and resampled_dem is not None and self.low_res_shape is not None:
             terrain_start = elite_size + random_size + best_based_size
-            initial_vector = _terrain_prior_vector(resampled_dem, self.low_res_shape, lb_val, ub_val)
+            spatial_dim = int(np.prod(self.low_res_shape))
+            initial_vector = _terrain_prior_vector(resampled_dem, self.low_res_shape, self.lb, self.ub, n_dim=self.n_dim)
 
             for i in range(terrain_start, self.size_pop):
                 # 添加较大的随机噪声
                 noise_level = int((ub_val - lb_val) * 0.2)  # 噪声级别为参数范围的20%
-                noise = np.random.randint(-noise_level, noise_level + 1, size=self.n_dim)
+                noise = np.zeros(self.n_dim, dtype=int)
+                noise[:spatial_dim] = np.random.randint(-noise_level, noise_level + 1, size=spatial_dim)
                 individual = initial_vector + noise
-                individual = np.clip(individual, lb_val, ub_val)
+                individual = np.clip(individual, self.lb, self.ub)
                 new_population[i] = individual
 
         # 更新种群
@@ -720,8 +832,7 @@ class MyGA:
         if best_x is None:
             return
         if self.Chrom is None:
-            lb_val, ub_val = _safe_int_bounds(self.lb, self.ub)
-            self.Chrom = np.random.randint(lb_val, ub_val + 1, size=(self.size_pop, self.n_dim))
+            self.Chrom = np.random.randint(self.lb, self.ub + 1, size=(self.size_pop, self.n_dim))
         best_x = np.asarray(best_x, dtype=int).reshape(-1)
         self.Chrom[0] = np.clip(best_x, self.lb, self.ub)
         if self.size_pop > 1:
@@ -893,23 +1004,34 @@ def optimize_uplift_ga(obj_func, resampled_dem, LOW_RES_SHAPE, ORIGINAL_SHAPE,
         if 'random_seed' in ga_params and ga_params['random_seed'] is not None:
             np.random.seed(int(ga_params['random_seed']))
 
-        n_dim = LOW_RES_SHAPE[0] * LOW_RES_SHAPE[1]
+        uplift_dim = LOW_RES_SHAPE[0] * LOW_RES_SHAPE[1]
         uplift_precision = _get_uplift_precision(ga_params)
         encoded_lb, encoded_ub = _encode_uplift_bounds(ga_params['lb'], ga_params['ub'], uplift_precision)
-        lb_array = np.full(n_dim, encoded_lb)
-        ub_array = np.full(n_dim, encoded_ub)
+        history_settings = _get_history_settings(ga_params)
+        n_dim = uplift_dim + int(history_settings["stage_count"])
+        lb_array = np.concatenate([np.full(uplift_dim, encoded_lb, dtype=int), history_settings["encoded_lb"]])
+        ub_array = np.concatenate([np.full(uplift_dim, encoded_ub, dtype=int), history_settings["encoded_ub"]])
 
         def decoded_obj_func(encoded_vector):
-            return obj_func(_decode_uplift_vector(encoded_vector, uplift_precision))
+            return obj_func(
+                _decode_candidate_vector(
+                    encoded_vector,
+                    uplift_dim=uplift_dim,
+                    uplift_precision=uplift_precision,
+                    history_settings=history_settings,
+                )
+            )
 
         logging.info(
             "Uplift encoding: real range %.6g..%.6g mm/yr, precision %.6g mm/yr, "
-            "integer range %s..%s",
+            "integer range %s..%s, uplift_dim=%s, history_stages=%s",
             ga_params['lb'],
             ga_params['ub'],
             uplift_precision,
             encoded_lb,
             encoded_ub,
+            uplift_dim,
+            history_settings["stage_count"],
         )
 
         # scikit-opt 的 set_run_mode 只是可选优化；部分环境导入 sko.tools
@@ -1037,7 +1159,14 @@ def optimize_uplift_ga(obj_func, resampled_dem, LOW_RES_SHAPE, ORIGINAL_SHAPE,
                 },
             )
 
-        decoded_best_x = None if overall_best_x is None else _decode_uplift_vector(overall_best_x, uplift_precision)
+        decoded_best_x = None
+        if overall_best_x is not None:
+            decoded_best_x = _decode_candidate_vector(
+                overall_best_x,
+                uplift_dim=uplift_dim,
+                uplift_precision=uplift_precision,
+                history_settings=history_settings,
+            )
         return decoded_best_x, overall_best_y, overall_history
 
     except Exception as e:

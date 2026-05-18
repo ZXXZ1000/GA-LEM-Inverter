@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 
-from ga_lem_inverter.pipeline.optimization import MyGA, optimize_uplift_ga, _allocate_counts
+from ga_lem_inverter.pipeline.optimization import MyGA, optimize_uplift_ga, _allocate_counts, split_decoded_candidate
 
 
 class MyGATests(unittest.TestCase):
@@ -128,6 +128,52 @@ class MyGATests(unittest.TestCase):
         all_values = np.concatenate(seen_values)
         self.assertTrue(np.all(all_values >= 0.2 - 1e-12))
         self.assertTrue(np.all(all_values <= 0.2 + 1e-12))
+
+    def test_optimize_uplift_ga_decodes_stage_multipliers_as_low_dimensional_tail(self):
+        """产品验收：时间变化 uplift history 只增加 m_stage 低维参数，不复制完整空间场。"""
+        seen = []
+
+        def objective(candidate):
+            uplift_vector, multipliers = split_decoded_candidate(candidate)
+            seen.append((uplift_vector.copy(), multipliers.copy()))
+            return float(np.mean((uplift_vector - 0.2) ** 2) + np.mean((multipliers - np.array([0.8, 1.2])) ** 2))
+
+        best_x, best_y, history = optimize_uplift_ga(
+            obj_func=objective,
+            resampled_dem=np.arange(4, dtype=float).reshape(2, 2),
+            LOW_RES_SHAPE=(2, 2),
+            ORIGINAL_SHAPE=(2, 2),
+            ga_params={
+                "pop": 6,
+                "max_iter": 1,
+                "search_strategy": "single",
+                "prob_cross": 0.0,
+                "prob_mut": 0.0,
+                "lb": 0.0,
+                "ub": 0.4,
+                "uplift_precision": 0.1,
+                "uplift_history_enabled": True,
+                "uplift_history_stage_count": 2,
+                "uplift_history_multiplier_min": 0.5,
+                "uplift_history_multiplier_max": 1.5,
+                "uplift_history_multiplier_precision": 0.1,
+                "decay_rate": 1.0,
+                "min_size_pop": 6,
+                "patience": 10,
+                "random_seed": 9,
+            },
+            model_params={},
+            n_jobs=1,
+            run_mode=None,
+        )
+
+        uplift, multipliers = split_decoded_candidate(best_x)
+        self.assertEqual(uplift.shape, (4,))
+        self.assertEqual(multipliers.shape, (2,))
+        self.assertTrue(all(item[0].shape == (4,) and item[1].shape == (2,) for item in seen))
+        self.assertTrue(np.all(multipliers >= 0.5 - 1e-12))
+        self.assertTrue(np.all(multipliers <= 1.5 + 1e-12))
+        self.assertAlmostEqual(best_y, history[-1])
 
     def test_spatial_crossover_handles_small_low_resolution_shapes(self):
         """低分辨率矩阵很小时，block_size 不能变成 0。"""

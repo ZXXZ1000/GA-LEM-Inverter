@@ -11,6 +11,28 @@ from typing import Any, Iterable
 import numpy as np
 
 
+NATIVE_OBSERVATION_FIELDS = [
+    "SAMPLE",
+    "LON",
+    "LAT",
+    "HEIGHT",
+    "AHE",
+    "DAHE",
+    "AFT",
+    "DAFT",
+    "ZHE",
+    "DZHE",
+    "ZFT",
+    "DZFT",
+]
+NATIVE_OBSERVATION_SYSTEM_PAIRS = (
+    ("AHE", "DAHE"),
+    ("AFT", "DAFT"),
+    ("ZHE", "DZHE"),
+    ("ZFT", "DZFT"),
+)
+
+
 @dataclass(frozen=True)
 class PecubeProject:
     """Paths for one generated Pecube project."""
@@ -138,6 +160,10 @@ class PecubeProjectBuilder:
 
     @staticmethod
     def _write_native_observation_file(source_path: Path, target_path: Path) -> None:
+        if _is_native_observation_csv(source_path):
+            _copy_native_observation_file(source_path, target_path)
+            return
+
         grouped: dict[str, dict[str, str | float]] = {}
         with source_path.open("r", encoding="utf-8-sig", newline="") as handle:
             reader = csv.DictReader(handle)
@@ -187,22 +213,8 @@ class PecubeProjectBuilder:
         if not grouped:
             raise ValueError(f"观测样品 CSV 没有可写入 Pecube 的样品行: {source_path}")
 
-        fieldnames = [
-            "SAMPLE",
-            "LON",
-            "LAT",
-            "HEIGHT",
-            "AHE",
-            "DAHE",
-            "AFT",
-            "DAFT",
-            "ZHE",
-            "DZHE",
-            "ZFT",
-            "DZFT",
-        ]
         with target_path.open("w", encoding="utf-8", newline="") as handle:
-            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer = csv.DictWriter(handle, fieldnames=NATIVE_OBSERVATION_FIELDS)
             writer.writeheader()
             for sample_id in sorted(grouped):
                 writer.writerow(grouped[sample_id])
@@ -242,22 +254,8 @@ class PecubeProjectBuilder:
             value_column, sigma_column = columns
             sample[value_column] = float(getattr(observation, "observed_age"))
             sample[sigma_column] = float(getattr(observation, "sigma"))
-        fieldnames = [
-            "SAMPLE",
-            "LON",
-            "LAT",
-            "HEIGHT",
-            "AHE",
-            "DAHE",
-            "AFT",
-            "DAFT",
-            "ZHE",
-            "DZHE",
-            "ZFT",
-            "DZFT",
-        ]
         with target_path.open("w", encoding="utf-8", newline="") as handle:
-            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer = csv.DictWriter(handle, fieldnames=NATIVE_OBSERVATION_FIELDS)
             writer.writeheader()
             for sample_id in sorted(grouped):
                 writer.writerow(grouped[sample_id])
@@ -331,3 +329,48 @@ def surface_temperature_from_topography(topography: np.ndarray, config: PecubePr
     """
     topo_km = np.asarray(topography, dtype=float) / 1000.0
     return float(config.sea_level_temperature) - float(config.lapse_rate) * topo_km
+
+
+def _is_native_observation_csv(path: Path) -> bool:
+    with Path(path).open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        if reader.fieldnames is None:
+            return False
+        normalized = {field.strip().upper() for field in reader.fieldnames}
+    required = {"SAMPLE", "LON", "LAT", "HEIGHT"}
+    age_columns = {"AHE", "AFT", "ZHE", "ZFT"}
+    return required.issubset(normalized) and bool(age_columns & normalized)
+
+
+def _copy_native_observation_file(source_path: Path, target_path: Path) -> None:
+    rows: list[dict[str, str | float]] = []
+    with Path(source_path).open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        if reader.fieldnames is None:
+            raise ValueError(f"观测样品 CSV 没有表头: {source_path}")
+        field_lookup = {field.strip().upper(): field for field in reader.fieldnames}
+        for row in reader:
+            sample = str(row.get(field_lookup.get("SAMPLE", ""), "")).strip()
+            if not sample:
+                continue
+            output_row: dict[str, str | float] = {}
+            for field in NATIVE_OBSERVATION_FIELDS:
+                source_field = field_lookup.get(field)
+                value = row.get(source_field, "") if source_field else ""
+                output_row[field] = value.strip() if isinstance(value, str) else value
+            for age_field, sigma_field in NATIVE_OBSERVATION_SYSTEM_PAIRS:
+                if _has_csv_value(output_row.get(age_field)) and not _has_csv_value(output_row.get(sigma_field)):
+                    raise ValueError(f"样品 {sample} 填写了 {age_field}，但缺少对应误差列 {sigma_field}。")
+            rows.append(output_row)
+
+    if not rows:
+        raise ValueError(f"观测样品 CSV 没有可写入 Pecube 的样品行: {source_path}")
+
+    with target_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=NATIVE_OBSERVATION_FIELDS)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _has_csv_value(value: Any) -> bool:
+    return str(value).strip() != ""

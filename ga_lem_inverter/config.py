@@ -149,6 +149,51 @@ def _validate_minimal_config(config: configparser.ConfigParser, mode: str) -> No
     if not output:
         raise UserConfigError("[Data] output_path 不能为空。请填写输出目录。")
 
+    _validate_pecube_time_alignment(config, mode)
+
+
+def _config_value_is_empty(value: str) -> bool:
+    return value.strip().lower() in {"", "none", "null", "skip", "false", "0"}
+
+
+def _pecube_enabled_for_validation(config: configparser.ConfigParser, mode: str) -> bool:
+    if "Pecube" not in config:
+        return False
+
+    raw = config.get("Pecube", "enabled", fallback="auto").strip().lower()
+    if raw in {"false", "0", "no", "off", "none", "skip"}:
+        return False
+    if raw in {"true", "1", "yes", "on"}:
+        return True
+
+    sample_raw = config.get("Pecube", "sample_observations", fallback="none")
+    return mode == "pecube_coupled" or not _config_value_is_empty(sample_raw)
+
+
+def _validate_pecube_time_alignment(config: configparser.ConfigParser, mode: str) -> None:
+    if "Pecube" not in config or "total_time_myr" not in config["Pecube"]:
+        return
+    if not _pecube_enabled_for_validation(config, mode):
+        return
+
+    try:
+        model_time_myr = config.getfloat("Model", "time_total") / 1_000_000.0
+        pecube_time_myr = config.getfloat("Pecube", "total_time_myr")
+    except ValueError as exc:
+        raise UserConfigError("[Model] time_total 和 [Pecube] total_time_myr 必须是数字。") from exc
+
+    tolerance = max(1e-6, abs(model_time_myr) * 1e-6)
+    if abs(model_time_myr - pecube_time_myr) <= tolerance:
+        return
+
+    raise UserConfigError(
+        "[Pecube] total_time_myr 必须和 [Model] time_total 对齐。"
+        f"当前 FastScape time_total={config.get('Model', 'time_total')} 年，"
+        f"等于 {model_time_myr:g} Ma，但 Pecube total_time_myr={pecube_time_myr:g} Ma。"
+        f"请把 [Pecube] total_time_myr 改为 {model_time_myr:g}，"
+        "或删除该项让程序自动使用 time_total/1e6。"
+    )
+
 
 def get_bool(config: configparser.ConfigParser, section: str, key: str, default: bool) -> bool:
     if section not in config or key not in config[section]:

@@ -39,6 +39,13 @@ from ga_lem_inverter.pipeline.visualization import flipped_display_array, map_ge
 
 REQUIRED_OBSERVATION_COLUMNS = ("sample_id", "elevation", "system", "observed_age", "sigma")
 COORDINATE_COLUMN_SETS = (("x", "y"), ("lon", "lat"), ("longitude", "latitude"))
+NATIVE_OBSERVATION_REQUIRED_COLUMNS = ("SAMPLE", "LON", "LAT", "HEIGHT")
+NATIVE_OBSERVATION_SYSTEMS = (
+    ("AHE", "DAHE", "AHe"),
+    ("AFT", "DAFT", "AFT"),
+    ("ZHE", "DZHE", "ZHe"),
+    ("ZFT", "DZFT", "ZFT"),
+)
 
 SYSTEM_TO_PECUBE_COLUMN = {
     "ahe": "HeApatite",
@@ -758,6 +765,24 @@ def load_observations(
         reader = csv.DictReader(handle)
         if reader.fieldnames is None:
             raise ValueError(f"观测样品 CSV 没有表头: {path}")
+        if _is_native_observation_fields(reader.fieldnames):
+            observations = _load_native_observation_rows(
+                reader,
+                path,
+                dem_shape,
+                coordinate_system=coordinate_system,
+                dlon=dlon,
+                dlat=dlat,
+                lon0=lon0,
+                lat0=lat0,
+                dem_crs=dem_crs,
+                dem_transform=dem_transform,
+                source_dem_shape=source_dem_shape,
+                observation_crs=observation_crs,
+            )
+            if not observations:
+                raise ValueError(f"观测样品 CSV 没有样品行: {path}")
+            return observations
         missing = [name for name in REQUIRED_OBSERVATION_COLUMNS if name not in reader.fieldnames]
         has_coordinate_columns = any(all(name in reader.fieldnames for name in names) for names in COORDINATE_COLUMN_SETS)
         if missing:
@@ -784,6 +809,84 @@ def load_observations(
             )
     if not observations:
         raise ValueError(f"观测样品 CSV 没有样品行: {path}")
+    return observations
+
+
+def _is_native_observation_fields(fieldnames: list[str]) -> bool:
+    normalized = {field.strip().upper() for field in fieldnames}
+    required = set(NATIVE_OBSERVATION_REQUIRED_COLUMNS)
+    age_columns = {"AHE", "AFT", "ZHE", "ZFT"}
+    return required.issubset(normalized) and bool(age_columns & normalized)
+
+
+def _load_native_observation_rows(
+    reader: csv.DictReader,
+    path: Path,
+    dem_shape: tuple[int, int],
+    *,
+    coordinate_system: str,
+    dlon: float,
+    dlat: float,
+    lon0: float,
+    lat0: float,
+    dem_crs: str | None,
+    dem_transform: tuple[float, float, float, float, float, float] | None,
+    source_dem_shape: tuple[int, int] | None,
+    observation_crs: str,
+) -> list[ThermochronologyObservation]:
+    field_lookup = {field.strip().upper(): field for field in (reader.fieldnames or [])}
+    missing = [name for name in NATIVE_OBSERVATION_REQUIRED_COLUMNS if name not in field_lookup]
+    if missing:
+        raise ValueError(f"Pecube 原生观测 CSV 缺少列: {', '.join(missing)}")
+
+    observations: list[ThermochronologyObservation] = []
+    for line_number, row in enumerate(reader, start=2):
+        sample = str(row.get(field_lookup["SAMPLE"], "")).strip()
+        if not sample:
+            continue
+        base = {
+            "sample_id": sample,
+            "lon": str(row.get(field_lookup["LON"], "")).strip(),
+            "lat": str(row.get(field_lookup["LAT"], "")).strip(),
+            "elevation": str(row.get(field_lookup["HEIGHT"], "")).strip(),
+        }
+        for age_column, sigma_column, system in NATIVE_OBSERVATION_SYSTEMS:
+            source_age = field_lookup.get(age_column)
+            if source_age is None:
+                continue
+            age = str(row.get(source_age, "")).strip()
+            if age == "":
+                continue
+            source_sigma = field_lookup.get(sigma_column)
+            sigma = str(row.get(source_sigma, "")).strip() if source_sigma else ""
+            if sigma == "":
+                raise ValueError(
+                    f"Pecube 原生观测 CSV 第 {line_number} 行 {sample} 有 {age_column} 年龄，"
+                    f"但缺少对应误差列 {sigma_column}。"
+                )
+            observations.append(
+                _parse_observation(
+                    {
+                        **base,
+                        "system": system,
+                        "observed_age": age,
+                        "sigma": sigma,
+                    },
+                    line_number,
+                    dem_shape,
+                    coordinate_system=coordinate_system,
+                    dlon=dlon,
+                    dlat=dlat,
+                    lon0=lon0,
+                    lat0=lat0,
+                    dem_crs=dem_crs,
+                    dem_transform=dem_transform,
+                    source_dem_shape=source_dem_shape,
+                    observation_crs=observation_crs,
+                )
+            )
+    if not observations:
+        raise ValueError(f"Pecube 原生观测 CSV 没有可用年龄列: {path}")
     return observations
 
 

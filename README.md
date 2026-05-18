@@ -94,11 +94,12 @@ mode = main
 - `[OptimizationStage1/2/3]`：staged 搜索的每阶段参数。后一阶段会继承前一阶段最优解，并继续围绕它搜索。
 - `[Model] boundary_left/right/top/bottom`：FastScape 四边边界，顺序为 `left,right,top,bottom`。`fixed_value` 表示闭合/固定边界，`core` 表示开放出水口，`looped` 表示周期边界；四项都填写时会覆盖单值 `boundary_status`。demo3 默认 `bottom = core`，其余边闭合。
 - `[Pecube] enabled`：默认 `auto`；配置了 `sample_observations` 时，`main` 模式会把 Pecube 热年代学 loss 接进 GA fitness。
-- `[Pecube] sample_observations`：热年代学样品 CSV；设为 `none` 即关闭 Pecube 约束。用户侧 schema 固定为“一行一个样品-体系观测”，程序会自动转换成 Pecube 原生 A-file。
+- `[Pecube] sample_observations`：热年代学样品 CSV；设为 `none` 即关闭 Pecube 约束。推荐使用 Pecube 原生宽表格式：`SAMPLE,LON,LAT,HEIGHT,AHE,DAHE,AFT,DAFT,ZHE,DZHE,ZFT,DZFT`。
 - `[Pecube] spatial_grid`：默认 `auto`，会从输入 DEM 的 CRS 和 transform 自动推导 Pecube 的 `lon0/lat0/dlon/dlat`。
 - `[Pecube] observation_coordinate_system`：默认 `geographic`，样品 CSV 使用真实 `lon,lat`；也可用 `projected/dem_crs` 输入 DEM 投影坐标，或用 `grid_index` 输入 DEM 行列索引。
 - `[Pecube] sea_level_temperature` / `lapse_rate`：自动生成 `temp0,temp1...` 地表温度场，公式为 `surface_temp = sea_level_temperature - lapse_rate * topography_km`。`lapse_rate` 用正数表示海拔越高越冷。
 - `[Pecube] thickness` / `basal_temperature` / `thermal_diffusivity`：Pecube 热模型参数，会写入每次候选解的 `Pecube.in`。
+- `[Pecube] total_time_myr`：Pecube 热史时间窗，单位 Ma，必须和 `[Model] time_total` 对齐。例如 `time_total = 2e6` 年时写 `total_time_myr = 2.0`；`time_total = 10e6` 年时写 `total_time_myr = 10.0`。程序会在启动时检查，避免 FastScape 地形历史和 Pecube 热史时间轴错配。
 - `[Pecube] nskip`：Pecube 读取地形网格的水平抽样步长。默认 `4`，优化搜索时显著减少中间数据和磁盘占用；最终高精度单次验证可调回 `1` 或 `2`。
 - `[Pecube] run_vtk`：默认 `false`，不生成 `.vtk` 三维体数据。GA 搜索会运行大量候选解，开启 VTK 很容易产生几十 GB 输出；只有需要 ParaView 后处理时才建议临时开启。
 - `[Pecube] run_test`：默认 `false`，优化搜索时不运行 Pecube 的 `Test` 检查程序，避免每个候选解额外写出 VTK 检查文件；调试 `Pecube.in` 时可临时改成 `true`。
@@ -162,7 +163,13 @@ python runner.py --config demo/configs/demo3_staged_medium_smoke.ini
 
 Pecube 以内置 vendor engine 形式接入。它既可以用 `mode = pecube_coupled` 做独立 smoke 验证，也可以在 `mode = main` 中作为热年代学约束参与 GA 搜索。
 
-当前耦合边界需要明确：GA 优化的是一个二维空间隆升场，FastScape 使用这个同一个 uplift 场连续正演，并输出多时间步 DEM/topography 序列；Pecube 接收这组 DEM history 以及同一个 uplift 场重复形成的 uplift 序列来计算热年代学约束。也就是说，当前版本支持“静态空间 uplift 场 + 地形约束 + Pecube 热年代学约束”的联合反演。
+当前耦合边界需要明确：GA 默认优化一个二维空间 uplift 场，FastScape 连续正演并输出多时间步 DEM/topography 序列，Pecube 接收同一套 `topography_series + uplift_series` 来计算热年代学约束。若 `[UpliftHistory] enabled = false`，`uplift_series` 是同一个平均场重复多帧；若开启 `stage_multiplier`，GA 优化的是：
+
+```text
+U(x,y,t) = U_base(x,y) * m_stage
+```
+
+也就是一个空间形态场 `U_base(x,y)` 加少数阶段倍率 `m_stage`，不是多个自由二维 uplift field。
 
 Pecube 目录模式要求 `topo0` 是 time zero，也就是现今地形；后续 `topo1,topo2...` 是更老的地形。主优化里 FastScape 输出的是正演序列，程序会在写入 Pecube 前自动反转为“现今到过去”的顺序，避免把早期随机地形误当成现今边界。
 
@@ -176,6 +183,29 @@ surface_temp = sea_level_temperature - lapse_rate * topography_km
 
 Pecube 的 `uplift0,uplift1...` 已经承接 GA 当前候选解的隆升场，单位 `km/Myr`。由于 `1 mm/yr = 1 km/Myr`，主优化传入的 `0.5..1.5 mm/yr` 可直接作为 Pecube uplift 网格。默认不会再写 Pecube 的 `npoint=-1` 全域速度场；只有显式设置 `include_uniform_velocity_field = true` 时才会叠加 `velocity_km_per_myr`。
 
+时间变化 uplift history 的第一版采用低维阶段倍率，而不是自由 `time,y,x` 三维场。配置示例：
+
+```ini
+[UpliftHistory]
+enabled = true
+mode = stage_multiplier
+stage_times_ma = 10,6,3,0
+multiplier_min = 0.5
+multiplier_max = 1.5
+multiplier_precision = 0.1
+normalize_time_weighted_mean = true
+```
+
+这表示：
+
+```text
+10-6 Ma: U_base * m1
+6-3 Ma : U_base * m2
+3-0 Ma : U_base * m3
+```
+
+`normalize_time_weighted_mean = true` 会把倍率按阶段时长归一化到加权均值为 1，因此 `U_base` 仍代表整个模拟时间窗的平均 uplift，`m_stage` 只表达早晚活动强弱。优化输出会额外保存 `figures/uplift_history_summary.png`、`arrays/stage_uplift.npy`、`arrays/cumulative_stage_uplift.npy` 和 `arrays/stage_multipliers.npy`。
+
 为了避免优化搜索输出过大，默认 Pecube 配置采用轻量输出：
 
 ```ini
@@ -188,7 +218,13 @@ save_ptt_paths = false
 
 `run_test = false` 表示优化搜索时不执行 Pecube 的 `Test` 检查程序，因为它也可能写出 VTK 检查文件。`run_vtk = false` 表示不执行 Pecube 的 VTK 后处理程序，因此不会为每个候选解生成 `.vtk` 三维体数据。`nskip = 4` 表示 Pecube 每 4 个 DEM/topo 格点采样一次，用较低水平分辨率计算热年代学预测。正式最终解如果需要更高精度，可以把 `nskip` 调成 `1` 或 `2`，并只在单次后处理时临时打开 `run_test = true` 或 `run_vtk = true`。
 
-尚未实现的是“时间变化 uplift history”作为优化变量，即 `time x y x` 的隆升历史。原因在于当前使用的 FastScape/xarray-simlab `basic_model` 接口只声明 `uplift__rate` 支持标量或二维 `(y, x)` 场，不支持一次正演中直接输入带时间维的 uplift forcing。不能把一次 FastScape 正演硬拆成多个彼此独立的小正演来伪造 uplift history，因为那会丢掉连续地形状态。后续若要支持时间变化 uplift，需要先实现可靠的 FastScape 连续状态继承，或改用/扩展支持 time-varying uplift forcing 的 FastScape 接口。
+仍未实现的是多个自由时间场：
+
+```text
+U_stage_1(y,x), U_stage_2(y,x), U_stage_3(y,x)
+```
+
+以及任意 `uplift__rate(time,y,x)` 三维 forcing。原因在于当前 Python FastScape `basic_model` 原生输入仍只支持标量或二维 `(y,x)` uplift；本项目通过自定义 `TimeScaledUplift` process 支持“一个空间场 + 阶段倍率”的连续正演。若未来要优化多个自由场，必须额外加入强正则、低维 delta field 或更多独立热史约束，否则不可识别性会很强。
 
 组合目标函数会先把两个约束归一化到 0-1，再做加权平均：
 
@@ -211,17 +247,51 @@ total_loss = (
 - `thermo_loss_scale` 控制热年代学 RMSE 映射到 0-1 的速度。它不是硬截断；即使 `thermo_loss_raw > thermo_loss_scale`，不同候选之间的热年代学差异仍会进入 GA 排序。
 - `terrain_loss`、`thermo_loss`、`total_loss` 才是进入 GA 搜索的 0-1 loss；`terrain_loss_raw` 和 `thermo_loss_raw` 会保存在表格里用于诊断。
 
-样品 CSV 至少包含：
+### 热年代学样品 CSV 怎么写
+
+`sample_observations` 是一个 CSV 文件路径。推荐输入格式直接采用 Pecube 原生宽表，这样用户看到的列名和 Pecube 文档、论文数据整理方式一致，程序只负责坐标检查和复制到本次 Pecube project。
+
+推荐表头：
 
 ```text
-sample_id,lon,lat,elevation,system,observed_age,sigma
+SAMPLE,LON,LAT,HEIGHT,AHE,DAHE,AFT,DAFT,ZHE,DZHE,ZFT,DZFT
 ```
 
-默认 demo 样品在 `demo/data/demo1/demo_thermo_samples.csv`，使用真实经纬度 `lon,lat`。`main` 模式会读取 DEM 的 CRS/transform，把 DEM 网格自动转换为 Pecube 的经纬度网格；样品点会自动校验是否落在 DEM/Pecube 范围内。当前支持 `AHe`、`ZHe`、`AFT`、`ZFT` 和 Pecube 输出中的常见 Ar 系列列名。若不需要热年代学约束，把 `sample_observations = none`。
+字段含义：
+
+| 字段 | 含义 | 单位 / 写法 |
+| --- | --- | --- |
+| `SAMPLE` | 样品编号 | 字符串；同一物理样品多个重复测年可拆成 `S01_AHE_1`、`S01_AHE_2` |
+| `LON` | 经度 | 默认真实经度，WGS84 / EPSG:4326 |
+| `LAT` | 纬度 | 默认真实纬度，WGS84 / EPSG:4326 |
+| `HEIGHT` | 样品高程 | m |
+| `AHE` / `DAHE` | AHe 年龄 / 1σ 误差 | Ma |
+| `AFT` / `DAFT` | AFT 年龄 / 1σ 误差 | Ma |
+| `ZHE` / `DZHE` | ZHe 年龄 / 1σ 误差 | Ma |
+| `ZFT` / `DZFT` | ZFT 年龄 / 1σ 误差 | Ma |
+
+最小示例：
+
+```csv
+SAMPLE,LON,LAT,HEIGHT,AHE,DAHE,AFT,DAFT,ZHE,DZHE,ZFT,DZFT
+S01,103.6400,31.3800,3901,2.4,0.3,5.8,0.8,7.1,1.0,18.3,2.1
+S01_AHE_2,103.6400,31.3800,3901,2.7,0.4,,,,,,
+S02,103.8120,31.5260,2300,,,,,6.4,0.9,,
+```
+
+规则：
+
+- 一行可以包含同一样品的多个体系，例如 AHe + AFT + ZHe。
+- 如果同一样品同一体系有多个重复年龄，Pecube 原生宽表无法在同一行表达，应拆成多行，并给不同 `SAMPLE` 名称，例如 `S01_AHE_1`、`S01_AHE_2`。
+- 年龄列和误差列必须成对出现，例如填了 `AHE` 就要填 `DAHE`。
+- 所有年龄和误差都用 Ma；不要写 ka、year 或 Myr 文本。
+- 默认 `observation_coordinate_system = geographic`，所以 `LON/LAT` 必须是真实经纬度。程序会读取 DEM 的 CRS/transform，把 DEM 网格自动转换为 Pecube 的经纬度网格，并检查样品是否落在 DEM/Pecube 范围内。
+
+默认 demo 样品在 `demo/data/demo1/demo_thermo_samples.csv`，使用真实经纬度坐标。当前推荐格式支持 `AHE`、`AFT`、`ZHE`、`ZFT` 四组 Pecube 原生列。若不需要热年代学约束，把 `sample_observations = none`。
 
 `demo/data/demo3/demo3_thermo_samples.csv` 保留原始收集样品，包含不同热年代学体系和从 Ma 到数百 Ma 的年龄。10 Ma demo 不能同时解释这些长期年龄，因此配置文件默认使用 `demo/data/demo3/demo3_thermo_samples_10ma.csv`，只保留 `observed_age <= 10 Ma` 的 AHe/AFT/ZHe 样品。若要使用 ZFT 或数十到数百 Ma 的 ZHe，需要把 FastScape/Pecube 的时间窗、热参数和运动学设置扩展到相同地质时间尺度。
 
-`sample_observations` 的固定 schema 是：
+旧版 long-table 仍然兼容，但不再作为推荐格式：
 
 ```csv
 sample_id,lon,lat,elevation,system,observed_age,sigma
@@ -229,9 +299,7 @@ LMW-01,103.64,31.38,3901,ZHe,51.5,1.7
 LMW-01,103.64,31.38,3901,AFT,56.5,19.8
 ```
 
-这里的规则只有两条：
-- 一行只表示一个样品在一个热年代学体系下的一条观测。
-- 同一个 `sample_id` 如果有多个体系，就重复多行；程序内部会自动聚合成 Pecube 原生 `SAMPLE/LON/LAT/HEIGHT/AHE/DAHE/...` 结构。
+程序会自动识别两种 CSV 表头。原生宽表会直接写入 Pecube project；旧版 long-table 会先转换成 Pecube 原生宽表。
 
 启用后会新增这些输出：
 

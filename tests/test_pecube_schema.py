@@ -8,6 +8,7 @@ import numpy as np
 from ga_lem_inverter.integrations.pecube import PecubeEngine
 from ga_lem_inverter.integrations.pecube_fitness import (
     ThermochronologyObservation,
+    load_observations,
     predictions_from_parsed,
     scaled_unit_loss,
 )
@@ -17,8 +18,84 @@ from ga_lem_inverter.integrations.pecube_project import PecubeProjectConfig, sur
 
 
 class PecubeSchemaAcceptanceTests(unittest.TestCase):
+    def test_native_pecube_sample_schema_is_preferred_input(self):
+        """产品验收：推荐输入为 Pecube 原生宽表 CSV，程序应直接接受并写入 A-file。"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = Path(tmpdir) / "samples_native.csv"
+            source.write_text(
+                "\n".join(
+                    [
+                        "SAMPLE,LON,LAT,HEIGHT,AHE,DAHE,AFT,DAFT,ZHE,DZHE,ZFT,DZFT",
+                        "S1,103.5,31.2,1200,12.3,0.4,25.1,1.2,45.0,2.0,,",
+                        "S1_AHE_2,103.5,31.2,1200,13.1,0.5,,,,,,",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            target = Path(tmpdir) / "observations.csv"
+            PecubeProjectBuilder._write_native_observation_file(source, target)
+
+            rows = list(csv.DictReader(target.open("r", encoding="utf-8", newline="")))
+
+        self.assertEqual(list(rows[0].keys()), ["SAMPLE", "LON", "LAT", "HEIGHT", "AHE", "DAHE", "AFT", "DAFT", "ZHE", "DZHE", "ZFT", "DZFT"])
+        self.assertEqual(rows[0]["SAMPLE"], "S1")
+        self.assertEqual(rows[0]["AHE"], "12.3")
+        self.assertEqual(rows[0]["AFT"], "25.1")
+        self.assertEqual(rows[0]["ZHE"], "45.0")
+        self.assertEqual(rows[1]["SAMPLE"], "S1_AHE_2")
+        self.assertEqual(rows[1]["AHE"], "13.1")
+
+    def test_native_pecube_sample_schema_expands_to_loss_observations(self):
+        """产品验收：Pecube 原生宽表的一行多体系必须展开为多条热年代学 loss 观测。"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = Path(tmpdir) / "samples_native.csv"
+            source.write_text(
+                "\n".join(
+                    [
+                        "SAMPLE,LON,LAT,HEIGHT,AHE,DAHE,AFT,DAFT,ZHE,DZHE,ZFT,DZFT",
+                        "S1,103.5,31.2,1200,12.3,0.4,25.1,1.2,45.0,2.0,60.0,5.0",
+                        "S1_AHE_2,103.5,31.2,1200,13.1,0.5,,,,,,",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            observations = load_observations(
+                source,
+                (10, 10),
+                coordinate_system="geographic",
+                lon0=103.0,
+                lat0=31.0,
+                dlon=0.1,
+                dlat=0.1,
+            )
+
+        self.assertEqual(len(observations), 5)
+        self.assertEqual([obs.system for obs in observations], ["AHe", "AFT", "ZHe", "ZFT", "AHe"])
+        self.assertEqual(observations[0].sample_id, "S1")
+        self.assertEqual(observations[-1].sample_id, "S1_AHE_2")
+        self.assertAlmostEqual(observations[-1].observed_age, 13.1)
+
+    def test_native_pecube_sample_schema_requires_age_sigma_pairs(self):
+        """产品验收：Pecube 原生宽表填了年龄就必须填对应误差，避免静默使用坏约束。"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = Path(tmpdir) / "samples_native.csv"
+            source.write_text(
+                "\n".join(
+                    [
+                        "SAMPLE,LON,LAT,HEIGHT,AHE,DAHE,AFT,DAFT,ZHE,DZHE,ZFT,DZFT",
+                        "S1,103.5,31.2,1200,12.3,,,,,,,",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            target = Path(tmpdir) / "observations.csv"
+
+            with self.assertRaisesRegex(ValueError, "DAHE"):
+                PecubeProjectBuilder._write_native_observation_file(source, target)
+
     def test_standard_sample_schema_converts_to_native_pecube_a_file(self):
-        """产品验收：用户只维护一套 sample_observations CSV，系统自动转成 Pecube A-file。"""
+        """产品验收：旧版 long-table sample_observations CSV 仍保持兼容。"""
         with tempfile.TemporaryDirectory() as tmpdir:
             source = Path(tmpdir) / "samples.csv"
             source.write_text(

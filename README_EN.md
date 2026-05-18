@@ -74,6 +74,61 @@ metrics/
 
 Start with `summary.md`; it lists the mode, key parameters, metrics, and main output locations. Files in `figures/` are automatically numbered in generation order, for example `01_original_dem.png`.
 
+## Key Configuration Rules
+
+Most users only edit `config.ini`.
+
+- `[Run] mode`: choose `main`, `synthetic`, `k_sensitivity`, or `pecube_coupled`.
+- `[Data] terrain_path`: input DEM path for `main` mode.
+- `[Data] fault_shp_path`: optional fault-line Shapefile; use `none` to skip it.
+- `[Data] study_area_shp_path`: optional study-area Shapefile; use `none` to use the whole DEM.
+- `[Model] time_total`: FastScape simulation time in years.
+- `[Pecube] total_time_myr`: Pecube thermal-history window in Ma. It must match `[Model] time_total / 1e6`. For example, `time_total = 2e6` requires `total_time_myr = 2.0`; `time_total = 10e6` requires `total_time_myr = 10.0`. The runner validates this at startup to prevent a FastScape/Pecube time-axis mismatch.
+- `[Pecube] sample_observations`: thermochronology sample CSV. Set it to `none` to disable the Pecube thermochronology constraint. The recommended input is Pecube's native wide CSV schema: `SAMPLE,LON,LAT,HEIGHT,AHE,DAHE,AFT,DAFT,ZHE,DZHE,ZFT,DZFT`.
+- `[Pecube] nskip`: horizontal subsampling used by Pecube. The default `4` keeps optimization outputs small; use `1` or `2` only for final high-resolution checks.
+- `[Pecube] run_vtk`: default `false`; keep it disabled during GA optimization to avoid very large VTK output.
+
+## Thermochronology CSV Input
+
+`sample_observations` is a CSV file path. The recommended format is Pecube's native wide table, so the column names match Pecube documentation and existing Pecube datasets. The runner validates coordinates and writes the table into the generated Pecube project.
+
+Recommended header:
+
+```text
+SAMPLE,LON,LAT,HEIGHT,AHE,DAHE,AFT,DAFT,ZHE,DZHE,ZFT,DZFT
+```
+
+Column meanings:
+
+| Column | Meaning | Unit / Format |
+| --- | --- | --- |
+| `SAMPLE` | Sample name | String; repeated analyses can be split into names such as `S01_AHE_1`, `S01_AHE_2` |
+| `LON` | Longitude | Real geographic longitude, WGS84 / EPSG:4326 by default |
+| `LAT` | Latitude | Real geographic latitude, WGS84 / EPSG:4326 by default |
+| `HEIGHT` | Sample elevation | m |
+| `AHE` / `DAHE` | AHe age / 1-sigma uncertainty | Ma |
+| `AFT` / `DAFT` | AFT age / 1-sigma uncertainty | Ma |
+| `ZHE` / `DZHE` | ZHe age / 1-sigma uncertainty | Ma |
+| `ZFT` / `DZFT` | ZFT age / 1-sigma uncertainty | Ma |
+
+Example:
+
+```csv
+SAMPLE,LON,LAT,HEIGHT,AHE,DAHE,AFT,DAFT,ZHE,DZHE,ZFT,DZFT
+S01,103.6400,31.3800,3901,2.4,0.3,5.8,0.8,7.1,1.0,18.3,2.1
+S01_AHE_2,103.6400,31.3800,3901,2.7,0.4,,,,,,
+S02,103.8120,31.5260,2300,,,,,6.4,0.9,,
+```
+
+Rules:
+
+- One row may contain multiple systems for the same sample, for example AHe + AFT + ZHe.
+- If the same sample has repeated ages for the same system, Pecube's native wide table cannot store them in one row. Split them into multiple rows with distinct `SAMPLE` names such as `S01_AHE_1` and `S01_AHE_2`.
+- Age and uncertainty columns must be filled in pairs, for example `AHE` requires `DAHE`.
+- All ages and uncertainties are in Ma.
+- The default `observation_coordinate_system = geographic` means `LON/LAT` are real geographic coordinates. The runner reads the DEM CRS/transform, derives the Pecube geographic grid, and checks whether samples fall inside the modeled region.
+- The older long-table schema `sample_id,lon,lat,elevation,system,observed_age,sigma` is still accepted for backward compatibility, but it is no longer the recommended format.
+
 ## Pecube Coupling
 
 Pecube is integrated as a vendored engine:

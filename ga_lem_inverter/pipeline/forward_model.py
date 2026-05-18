@@ -2,11 +2,163 @@
 import xsimlab as xs
 import numpy as np
 from fastscape.models import basic_model
+from fastscape.processes.boundary import BorderBoundary
+from fastscape.processes.context import FastscapelibContext
+from fastscape.processes.grid import UniformRectilinearGrid2D
+from fastscape.processes.main import SurfaceTopography
 import logging
 import warnings
+from dataclasses import dataclass
 
 
 VALID_BOUNDARY_STATUS = {"fixed_value", "core", "looped"}
+
+
+@dataclass(frozen=True)
+class FastscapeSeriesResult:
+    """FastScape topography history plus the uplift field used at each output frame."""
+
+    topography_series: np.ndarray
+    uplift_series: np.ndarray
+    output_times: np.ndarray
+    stage_edges_years: np.ndarray
+    stage_multipliers: np.ndarray
+
+
+@xs.process
+class InitialDEM:
+    """Initialize FastScape from an explicit DEM instead of random noise."""
+
+    initial_elevation = xs.variable(dims=("y", "x"), description="initial DEM")
+    shape = xs.foreign(UniformRectilinearGrid2D, "shape")
+    elevation = xs.foreign(SurfaceTopography, "elevation", intent="out")
+
+    def initialize(self):
+        dem = np.asarray(self.initial_elevation, dtype=float)
+        if tuple(dem.shape) != tuple(self.shape):
+            raise ValueError(f"initial_elevation shape {dem.shape} 与 FastScape 网格 {tuple(self.shape)} 不一致。")
+        if not np.isfinite(dem).all():
+            raise ValueError("initial_elevation 不能包含 NaN/Inf。")
+        self.elevation = dem.copy()
+
+
+@xs.process
+class TimeScaledUplift:
+    """Block uplift with a time-dependent multiplier applied to one spatial field."""
+
+    rate = xs.variable(dims=[(), ("y", "x")], description="base uplift rate")
+    stage_edges_years = xs.variable(dims="stage_edge", static=True, description="elapsed stage boundaries in years")
+    stage_multipliers = xs.variable(dims="stage", static=True, description="uplift multiplier for each stage")
+
+    shape = xs.foreign(UniformRectilinearGrid2D, "shape")
+    status = xs.foreign(BorderBoundary, "border_status")
+    fs_context = xs.foreign(FastscapelibContext, "context")
+
+    uplift = xs.variable(
+        dims=[(), ("y", "x")],
+        intent="out",
+        groups=["bedrock_forcing_upward", "surface_forcing_upward"],
+        description="imposed vertical uplift",
+    )
+
+    def initialize(self):
+        self._stage_edges = np.asarray(self.stage_edges_years, dtype=float).reshape(-1)
+        self._stage_multipliers = np.asarray(self.stage_multipliers, dtype=float).reshape(-1)
+        validate_stage_history(self._stage_edges, self._stage_multipliers)
+
+        self._mask = np.ones(self.shape)
+        _all = slice(None)
+        slices = [(_all, 0), (_all, -1), (0, _all), (-1, _all)]
+        for status, border in zip(self.status, slices):
+            if status == "fixed_value":
+                self._mask[border] = 0.0
+
+    @xs.runtime(args=("step_start", "step_delta"))
+    def run_step(self, current_time, dt):
+        stage_index = stage_index_for_elapsed_time(np.asarray(current_time, dtype=float).item(), self._stage_edges)
+        multiplier = self._stage_multipliers[stage_index]
+        rate = np.broadcast_to(self.rate, self.shape) * self._mask * multiplier
+        self.uplift = rate * dt
+
+
+def validate_stage_history(stage_edges_years, stage_multipliers):
+    """Validate elapsed stage boundaries and multipliers."""
+    edges = np.asarray(stage_edges_years, dtype=float).reshape(-1)
+    multipliers = np.asarray(stage_multipliers, dtype=float).reshape(-1)
+    if edges.size < 2:
+        raise ValueError("stage_edges_years 至少需要两个边界。")
+    if multipliers.size != edges.size - 1:
+        raise ValueError(
+            f"stage_multipliers 数量必须等于 stage_edges_years-1: "
+            f"{multipliers.size} != {edges.size - 1}"
+        )
+    if not np.all(np.isfinite(edges)) or not np.all(np.isfinite(multipliers)):
+        raise ValueError("stage_edges_years/stage_multipliers 不能包含 NaN/Inf。")
+    if not np.all(np.diff(edges) > 0):
+        raise ValueError("stage_edges_years 必须严格递增，单位为从模拟开始算起的年。")
+    if np.any(multipliers <= 0):
+        raise ValueError("stage_multipliers 必须为正数。")
+
+
+def stage_edges_from_ma(stage_times_ma, *, time_total_years, tolerance=1e-6):
+    """Convert geological stage times before present into elapsed model years.
+
+    Example: ``10, 6, 3, 0`` Ma with ``time_total=10e6`` becomes
+    ``0, 4e6, 7e6, 10e6`` elapsed years for the forward model.
+    """
+    times = np.asarray(stage_times_ma, dtype=float).reshape(-1)
+    if times.size < 2:
+        raise ValueError("stage_times_ma 至少需要两个时间点，例如 10,6,3,0。")
+    if not np.all(np.isfinite(times)):
+        raise ValueError("stage_times_ma 不能包含 NaN/Inf。")
+    if not np.all(np.diff(times) < 0):
+        raise ValueError("stage_times_ma 必须按从过去到现在递减填写，例如 10,6,3,0。")
+    if abs(float(times[-1])) > tolerance:
+        raise ValueError("stage_times_ma 最后一个值必须是 0，表示现今。")
+    total_ma = float(time_total_years) / 1.0e6
+    if abs(float(times[0]) - total_ma) > max(tolerance, total_ma * 1e-6):
+        raise ValueError(
+            f"stage_times_ma 第一个值必须和 [Model] time_total 对齐: "
+            f"{times[0]} Ma != {total_ma} Ma"
+        )
+    edges = (times[0] - times) * 1.0e6
+    edges[0] = 0.0
+    edges[-1] = float(time_total_years)
+    return edges.astype(float)
+
+
+def normalize_stage_multipliers(stage_multipliers, stage_edges_years, *, enabled=True):
+    """Normalize multipliers so their time-weighted mean equals one."""
+    multipliers = np.asarray(stage_multipliers, dtype=float).reshape(-1)
+    edges = np.asarray(stage_edges_years, dtype=float).reshape(-1)
+    validate_stage_history(edges, multipliers)
+    if not enabled:
+        return multipliers.copy()
+    durations = np.diff(edges)
+    weighted_mean = float(np.sum(multipliers * durations) / np.sum(durations))
+    if not np.isfinite(weighted_mean) or weighted_mean <= 0:
+        raise ValueError("stage_multipliers 时间加权均值必须为正。")
+    return multipliers / weighted_mean
+
+
+def stage_index_for_elapsed_time(elapsed_years, stage_edges_years):
+    """Return the stage index for an elapsed model time in years."""
+    edges = np.asarray(stage_edges_years, dtype=float).reshape(-1)
+    value = float(elapsed_years)
+    if value <= edges[0]:
+        return 0
+    if value >= edges[-1]:
+        return len(edges) - 2
+    return int(np.searchsorted(edges[1:], value, side="right"))
+
+
+def stage_multipliers_for_times(output_times, stage_edges_years, stage_multipliers):
+    """Map elapsed output times to stage multipliers."""
+    times = np.asarray(output_times, dtype=float).reshape(-1)
+    multipliers = np.asarray(stage_multipliers, dtype=float).reshape(-1)
+    edges = np.asarray(stage_edges_years, dtype=float).reshape(-1)
+    validate_stage_history(edges, multipliers)
+    return np.asarray([multipliers[stage_index_for_elapsed_time(t, edges)] for t in times], dtype=float)
 
 
 def normalize_boundary_status(status):
@@ -90,6 +242,20 @@ def align_fastscape_inputs(k_sp, uplift, *, x_size, y_size):
     uplift_aligned = align_model_field(uplift, target_shape, label="uplift", order=1)
     return k_sp_aligned, uplift_aligned
 
+
+def _fastscape_times(time_total, output_steps):
+    output_steps = max(2, int(output_steps))
+    master_times = np.linspace(0, time_total, 101)
+    output_steps = min(output_steps, len(master_times) - 1)
+    output_indices = np.linspace(1, len(master_times) - 1, output_steps, dtype=int)
+    out_times = master_times[output_indices]
+    return master_times, out_times
+
+
+def fastscape_output_times(time_total, output_steps):
+    """Return elapsed FastScape output times in years for plot labels and QA."""
+    return _fastscape_times(time_total, output_steps)[1]
+
 def run_fastscape_series(
     k_sp,
     uplift,
@@ -133,18 +299,13 @@ def run_fastscape_series(
         k_sp, uplift = align_fastscape_inputs(k_sp, uplift, x_size=x_size, y_size=y_size)
         boundary_status = normalize_boundary_status(boundary_status)
 
-        output_steps = max(2, int(output_steps))
-
         # 在运行模型前添加以下代码
         warnings.filterwarnings("ignore", category=FutureWarning,
                             message="variable .* with name matching its dimension")
         # Pecube cannot reliably consume FastScape's raw t=0 random seed
         # topography as the oldest surface. Emit only evolved snapshots while
         # keeping the output clock aligned with the master clock.
-        master_times = np.linspace(0, time_total, 101)
-        output_steps = min(output_steps, len(master_times) - 1)
-        output_indices = np.linspace(1, len(master_times) - 1, output_steps, dtype=int)
-        out_times = master_times[output_indices]
+        master_times, out_times = _fastscape_times(time_total, output_steps)
         ds_in = xs.create_setup(
             model=basic_model,
             clocks={'time': master_times, 'out': out_times},
@@ -168,6 +329,89 @@ def run_fastscape_series(
     except Exception as e:
         logging.error(f"运行 fastscape 模型出错: {e}")
         raise RuntimeError(f"运行 fastscape 模型出错: {e}")
+
+
+def run_fastscape_time_scaled_series(
+    k_sp,
+    uplift,
+    k_diff,
+    x_size,
+    y_size,
+    spacing,
+    *,
+    stage_edges_years,
+    stage_multipliers,
+    initial_dem=None,
+    boundary_status='fixed_value',
+    area_exp=0.43,
+    slope_exp=1,
+    time_total=10e6,
+    initial_topography_seed=42,
+    output_steps=21,
+):
+    """Run FastScape with ``U(x,y,t) = U_base(x,y) * multiplier(stage)``.
+
+    Uplift input and returned ``uplift_series`` are in mm/yr. FastScape itself
+    receives m/yr, matching the static runner.
+    """
+    try:
+        logging.info("Fastscape time-scaled input shapes:")
+        logging.info(f"k_sp shape: {k_sp.shape}")
+        logging.info(f"uplift shape: {uplift.shape}")
+        logging.info(f"Requested grid size: {y_size} x {x_size}")
+
+        k_sp, uplift = align_fastscape_inputs(k_sp, uplift, x_size=x_size, y_size=y_size)
+        boundary_status = normalize_boundary_status(boundary_status)
+        stage_edges = np.asarray(stage_edges_years, dtype=float).reshape(-1)
+        multipliers = np.asarray(stage_multipliers, dtype=float).reshape(-1)
+        validate_stage_history(stage_edges, multipliers)
+        if abs(stage_edges[0]) > 1e-6 or abs(stage_edges[-1] - float(time_total)) > max(1e-6, float(time_total) * 1e-9):
+            raise ValueError("stage_edges_years 必须从 0 开始，并以 time_total 结束。")
+
+        warnings.filterwarnings("ignore", category=FutureWarning,
+                            message="variable .* with name matching its dimension")
+        master_times, out_times = _fastscape_times(time_total, output_steps)
+        model = basic_model.update_processes({"uplift": TimeScaledUplift})
+        input_vars = {
+            'grid__shape': [y_size, x_size],
+            'grid__length': [y_size * spacing, x_size * spacing],
+            'boundary__status': boundary_status,
+            'uplift__rate': uplift * 10**(-3),
+            'uplift__stage_edges_years': stage_edges,
+            'uplift__stage_multipliers': multipliers,
+            'spl__k_coef': k_sp,
+            'spl__area_exp': area_exp,
+            'spl__slope_exp': slope_exp,
+            'diffusion__diffusivity': k_diff * 10**(-2),
+        }
+        if initial_dem is None:
+            input_vars['init_topography__seed'] = initial_topography_seed
+        else:
+            initial = align_model_field(initial_dem, (int(y_size), int(x_size)), label="initial_dem", order=1)
+            model = model.update_processes({"init_topography": InitialDEM})
+            input_vars['init_topography__initial_elevation'] = initial
+
+        ds_in = xs.create_setup(
+            model=model,
+            clocks={'time': master_times, 'out': out_times},
+            master_clock='time',
+            input_vars=input_vars,
+            output_vars={'topography__elevation': 'out'},
+        )
+        out_ds = ds_in.xsimlab.run(model=model)
+        topographies = out_ds.topography__elevation.values
+        output_multipliers = stage_multipliers_for_times(out_times, stage_edges, multipliers)
+        uplift_series = np.asarray([uplift * multiplier for multiplier in output_multipliers], dtype=float)
+        return FastscapeSeriesResult(
+            topography_series=topographies,
+            uplift_series=uplift_series,
+            output_times=out_times,
+            stage_edges_years=stage_edges,
+            stage_multipliers=multipliers,
+        )
+    except Exception as e:
+        logging.error(f"运行 time-scaled fastscape 模型出错: {e}")
+        raise RuntimeError(f"运行 time-scaled fastscape 模型出错: {e}")
 
 
 def run_fastscape_model(
