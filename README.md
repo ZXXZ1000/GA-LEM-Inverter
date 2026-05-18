@@ -2,6 +2,70 @@
 
 GA-LEM-Inverter 是一个基于 Fastscape 景观演化模型和遗传算法的构造隆升场反演工具。当前版本已经整理为统一入口：普通用户只需要安装环境、修改 `config.ini`、运行 `python runner.py`。
 
+## 新用户最快开始
+
+第一次使用时，不需要改任何代码，也不需要准备自己的数据。项目已经内置了轻量 demo 数据。
+
+### 1. 安装环境
+
+macOS / Linux / Windows Git Bash：
+
+```bash
+bash tools/environment/setup_environment.sh
+```
+
+Windows PowerShell：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\environment\setup_environment.ps1
+```
+
+安装脚本会把环境创建到项目根目录的 `./.conda`，并自动安装 FastScape、Pecube、LPIPS、地理空间依赖和编译工具。
+
+### 2. 运行最快 demo
+
+安装完成后激活环境：
+
+```bash
+conda activate ./.conda
+```
+
+然后直接运行：
+
+```bash
+python runner.py
+```
+
+默认 `config.ini` 已经指向：
+
+```text
+demo/data/demo1/demo_dem.tif
+demo/data/demo1/demo_thermo_samples.csv
+```
+
+这个 demo 用于快速确认完整程序能跑起来，并生成一组轻量反演结果。
+
+### 3. 查看结果
+
+运行结束后，终端会打印：
+
+```text
+运行完成。结果目录: demo/outputs/xxxx_main
+优先查看: demo/outputs/xxxx_main/summary.md
+```
+
+先打开 `summary.md`，再按编号查看 `figures/` 里的图片。每次运行都会生成一个新的编号和时间戳目录，不会覆盖旧结果。
+
+### 4. 运行完整耦合 demo
+
+如果想看真实区域 DEM、断层、研究区、Pecube 热年代学约束和 staged uplift history 的完整链路，运行：
+
+```bash
+python runner.py --config demo/configs/demo3_staged_smoke.ini
+```
+
+这个 demo 比默认 demo 慢，但能展示 FastScape + Pecube + GA 联合约束反演的完整流程。
+
 ## 一键安装
 
 克隆仓库后进入项目目录：
