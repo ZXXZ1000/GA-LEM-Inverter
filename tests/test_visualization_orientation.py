@@ -7,19 +7,19 @@ from rasterio.transform import from_origin
 
 from ga_lem_inverter.integrations.pecube_fitness import PecubeFitnessEvaluator, ThermochronologyPrediction
 from ga_lem_inverter.outputs import create_run_context
-from ga_lem_inverter.pipeline.visualization import flipped_display_array
+from ga_lem_inverter.pipeline.visualization import flipped_display_array, oriented_display_array
 import configparser
 
 
 class VisualizationOrientationTests(unittest.TestCase):
     def test_flipped_display_array_matches_demo_alignment_rule(self):
-        """产品验收：旋转后矩阵显示必须固定为上下+左右双翻。"""
+        """产品验收：旧的像素旋转 demo 仍保持上下+左右双翻。"""
         matrix = np.array([[1, 2, 3], [4, 5, 6]], dtype=float)
         expected = np.array([[6, 5, 4], [3, 2, 1]], dtype=float)
         np.testing.assert_array_equal(flipped_display_array(matrix), expected)
 
     def test_dem_and_uplift_keep_same_display_corner_after_flip(self):
-        """产品验收：DEM、Ksp、uplift 和最终地形图必须使用同一显示方向。"""
+        """产品验收：旧 demo 的 DEM、Ksp、uplift 必须共用同一双翻方向。"""
         dem = np.zeros((4, 5), dtype=float)
         uplift = np.zeros_like(dem)
         dem[-1, -1] = 3000.0
@@ -33,6 +33,61 @@ class VisualizationOrientationTests(unittest.TestCase):
             np.unravel_index(np.argmax(dem_display), dem_display.shape),
             np.unravel_index(np.argmax(uplift_display), uplift_display.shape),
         )
+
+    def test_unrotated_georeferenced_display_is_not_mirrored(self):
+        """产品验收：未旋转 north-up DEM 显示不能被上下+左右镜像。"""
+        matrix = np.array([[1, 2, 3], [4, 5, 6]], dtype=float)
+
+        np.testing.assert_array_equal(oriented_display_array(matrix, rotated=False), matrix)
+
+    def test_rotated_display_keeps_legacy_demo_alignment(self):
+        """产品验收：只有旧的像素旋转视图仍沿用 demo 双翻规则。"""
+        matrix = np.array([[1, 2, 3], [4, 5, 6]], dtype=float)
+
+        np.testing.assert_array_equal(
+            oriented_display_array(matrix, rotated=True),
+            flipped_display_array(matrix),
+        )
+
+    def test_pecube_pixel_background_uses_unrotated_orientation_by_default(self):
+        """产品验收：Pecube 诊断底图默认不镜像未旋转 DEM。"""
+        cfg = configparser.ConfigParser()
+        cfg.read_dict({"Pecube": {"enabled": "false"}, "Fitness": {}})
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "test.ini"
+            config_path.write_text("[Data]\noutput_path = ./outputs\n", encoding="utf-8")
+            context = create_run_context(config_path, cfg, "main")
+            target = np.arange(6, dtype=float).reshape(2, 3)
+            evaluator = PecubeFitnessEvaluator.from_config(
+                config=cfg,
+                context=context,
+                target_dem=target,
+                ksp=np.ones_like(target),
+                model_params={},
+            )
+
+        np.testing.assert_array_equal(evaluator.target_dem_pixel, target)
+
+    def test_pecube_pixel_background_can_use_rotated_demo_orientation(self):
+        """产品验收：显式要求 legacy 视图时，Pecube 底图仍可双翻。"""
+        cfg = configparser.ConfigParser()
+        cfg.read_dict({"Pecube": {"enabled": "false"}, "Fitness": {}})
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "test.ini"
+            config_path.write_text("[Data]\noutput_path = ./outputs\n", encoding="utf-8")
+            context = create_run_context(config_path, cfg, "main")
+            target = np.arange(6, dtype=float).reshape(2, 3)
+            evaluator = PecubeFitnessEvaluator.from_config(
+                config=cfg,
+                context=context,
+                target_dem=target,
+                ksp=np.ones_like(target),
+                model_params={"display_rotated": True},
+            )
+
+        np.testing.assert_array_equal(evaluator.target_dem_pixel, flipped_display_array(target))
 
     def test_pecube_predictions_project_back_to_rotated_dem_pixels(self):
         """产品验收：Pecube 经纬度样品点必须能投回主 DEM 像素坐标视图。"""
@@ -56,7 +111,7 @@ class VisualizationOrientationTests(unittest.TestCase):
                 context=context,
                 target_dem=np.arange(100, dtype=float).reshape(10, 10),
                 ksp=np.ones((10, 10), dtype=float),
-                model_params={},
+                model_params={"display_rotated": True},
             )
             profile = {
                 "crs": "EPSG:32648",

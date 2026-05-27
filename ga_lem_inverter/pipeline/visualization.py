@@ -211,8 +211,16 @@ def plot_3d_surface(data: np.ndarray, uplift: np.ndarray,
 
 
 def flipped_display_array(data: np.ndarray) -> np.ndarray:
-    """Use the validated rotated-DEM display convention from demo2/demo3 alignment checks."""
+    """Apply the historical double-flip used by legacy pixel-rotation demos."""
     return np.fliplr(np.flipud(np.asarray(data)))
+
+
+def oriented_display_array(data: np.ndarray, *, rotated: bool = False) -> np.ndarray:
+    """Return display pixels, using double-flip only for legacy non-georeferenced rotations."""
+    array = np.asarray(data)
+    if rotated:
+        return flipped_display_array(array)
+    return array
 
 
 def map_geometries_to_pixel_space(

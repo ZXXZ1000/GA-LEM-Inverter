@@ -34,7 +34,7 @@ from ga_lem_inverter.integrations.pecube import PecubeEngine
 from ga_lem_inverter.integrations.pecube_parser import PecubeParsedOutput
 from ga_lem_inverter.integrations.pecube_project import PecubeProjectConfig, surface_temperature_from_topography
 from ga_lem_inverter.outputs import RunContext
-from ga_lem_inverter.pipeline.visualization import flipped_display_array, map_geometries_to_pixel_space
+from ga_lem_inverter.pipeline.visualization import oriented_display_array, map_geometries_to_pixel_space
 
 
 REQUIRED_OBSERVATION_COLUMNS = ("sample_id", "elevation", "system", "observed_age", "sigma")
@@ -197,7 +197,8 @@ class PecubeFitnessEvaluator:
         self.history_dir = self.context.root / "pecube" / "fitness_history"
         self.spatial_adapter: PecubeSpatialAdapter | None = None
         self.target_dem_pecube = self.target_dem
-        self.target_dem_pixel = flipped_display_array(self.target_dem)
+        self.display_rotated = bool(self.model_params.get("display_rotated", False))
+        self.target_dem_pixel = oriented_display_array(self.target_dem, rotated=self.display_rotated)
 
         if self.enabled:
             self.engine.validate()
@@ -289,8 +290,8 @@ class PecubeFitnessEvaluator:
             Affine(*self.spatial_adapter.source_transform),
             height=self.spatial_adapter.source_shape[0],
             width=self.spatial_adapter.source_shape[1],
-            flip_vertical=True,
-            flip_horizontal=True,
+            flip_vertical=self.display_rotated,
+            flip_horizontal=self.display_rotated,
         )
         rows: list[dict[str, float]] = []
         for item, geom in zip(items, pixel_points.geometry):
@@ -498,8 +499,8 @@ class PecubeFitnessEvaluator:
 
         age_surface_path = self.context.figure_path("pecube_age_surface_map.png")
         generated_dem_pecube = self._to_pecube_grid(generated_dem) if generated_dem is not None else self.target_dem_pecube
-        generated_dem_pixel = flipped_display_array(generated_dem) if generated_dem is not None else self.target_dem_pixel
-        uplift_pixel = flipped_display_array(uplift) if uplift is not None else None
+        generated_dem_pixel = oriented_display_array(generated_dem, rotated=self.display_rotated) if generated_dem is not None else self.target_dem_pixel
+        uplift_pixel = oriented_display_array(uplift, rotated=self.display_rotated) if uplift is not None else None
         pixel_predictions = self.observation_pixels(self.best_result.predictions)
         crop_width = max(int(output_border_crop or 0), 0)
         target_dem_pixel = crop_pixel_border(self.target_dem_pixel, crop_width)

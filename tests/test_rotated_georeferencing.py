@@ -2,15 +2,23 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import configparser
 import csv
 import geopandas as gpd
 import numpy as np
+import rasterio
 from rasterio.transform import from_origin
 from shapely.affinity import rotate
 from shapely.geometry import LineString, box
 
 from ga_lem_inverter.integrations.pecube_fitness import load_observations, pecube_spatial_adapter_from_dem_profile
-from ga_lem_inverter.pipeline.data import build_rotated_profile_from_study_area, reproject_array_to_profile
+from ga_lem_inverter.pipeline.data import (
+    build_rotated_profile_from_dem_footprint,
+    build_rotated_profile_from_study_area,
+    load_dem_data,
+    reproject_array_to_profile,
+    reproject_files_to_geographic,
+)
 from ga_lem_inverter.pipeline.erosion import create_erosion_field
 from ga_lem_inverter.workflows.main_inversion import fill_Nan
 
@@ -143,6 +151,88 @@ class RotatedGeoreferencingAcceptanceTests(unittest.TestCase):
         boosted_pixels = np.argwhere(ksp > 1.0)
         self.assertGreater(boosted_pixels.shape[0], 0)
         self.assertLess(abs(float(np.median(boosted_pixels[:, 1])) - 50.0), 2.0)
+
+    def test_reprojected_raster_writes_outside_footprint_as_nan(self):
+        """产品验收：经纬度 DEM 投影到 UTM 后，外接网格空白区必须是 NaN 而不是 0 海拔。"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            terrain_path = Path(tmpdir) / "hangay_like.tif"
+            with rasterio.open(
+                terrain_path,
+                "w",
+                driver="GTiff",
+                height=24,
+                width=36,
+                count=1,
+                dtype="float32",
+                crs="EPSG:4326",
+                transform=from_origin(96.5, 48.2, 0.05, 0.05),
+            ) as dst:
+                dst.write(np.full((24, 36), 1800.0, dtype=np.float32), 1)
+
+            config = configparser.ConfigParser()
+            config["Paths"] = {
+                "terrain_path": str(terrain_path),
+                "fault_shp_path": "none",
+                "study_area_shp_path": "none",
+                "output_path": str(Path(tmpdir) / "outputs"),
+            }
+
+            updated = reproject_files_to_geographic(config, "EPSG:32647")
+            self.assertEqual(Path(updated["Paths"]["terrain_path"]).parent.name, "reprojected_inputs")
+            with rasterio.open(updated["Paths"]["terrain_path"]) as src:
+                data = src.read(1)
+                nodata = src.nodata
+
+        self.assertEqual(str(nodata), "nan")
+        self.assertTrue(np.isnan(data).any())
+        self.assertEqual(np.count_nonzero(data == 0.0), 0)
+
+    def test_load_dem_data_preserves_geotiff_nodata_as_nan(self):
+        """产品验收：用户直接输入已裁切 DEM 时，GeoTIFF nodata 不能被当作有效地形。"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            terrain_path = Path(tmpdir) / "clipped_dem.tif"
+            dem = np.full((12, 16), 2000.0, dtype=np.float32)
+            dem[:2, :] = -9999.0
+            with rasterio.open(
+                terrain_path,
+                "w",
+                driver="GTiff",
+                height=12,
+                width=16,
+                count=1,
+                dtype="float32",
+                crs="EPSG:32647",
+                transform=from_origin(300000.0, 5400000.0, 30.0, 30.0),
+                nodata=-9999.0,
+            ) as dst:
+                dst.write(dem, 1)
+
+            loaded, profile = load_dem_data(str(terrain_path), ratio=1.0)
+
+        self.assertTrue(np.isnan(loaded[:2, :]).all())
+        self.assertTrue(np.isnan(profile["nodata"]))
+
+    def test_dem_footprint_rotation_is_inferred_without_study_area(self):
+        """产品验收：用户只给已裁切 DEM 时，主流程仍能从有效 footprint 推断旋转网格。"""
+        profile = {
+            "crs": "EPSG:32647",
+            "transform": from_origin(300000.0, 5400000.0, 30.0, 30.0),
+            "height": 120,
+            "width": 160,
+            "dtype": "float32",
+            "nodata": np.nan,
+        }
+        dem = np.full((120, 160), np.nan, dtype=np.float32)
+        y, x = np.indices(dem.shape)
+        footprint = (x > 15) & (x < 145) & (y > 12 + 0.2 * x) & (y < 88 + 0.2 * x)
+        dem[footprint] = 2500.0
+
+        rotated_profile, rotation_angle = build_rotated_profile_from_dem_footprint(profile, dem, spacing=30.0)
+
+        self.assertGreater(abs(rotation_angle), 0.25)
+        self.assertNotAlmostEqual(rotated_profile["transform"].b, 0.0)
+        self.assertNotAlmostEqual(rotated_profile["transform"].d, 0.0)
+        self.assertLess(rotated_profile["height"], profile["height"])
 
     @staticmethod
     def _write_samples(path: Path, x: float, y: float) -> None:

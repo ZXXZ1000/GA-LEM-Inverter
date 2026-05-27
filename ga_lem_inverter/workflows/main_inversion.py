@@ -36,6 +36,7 @@ from ga_lem_inverter.pipeline.data import (
     rotate_data,
     reproject_files_to_geographic,
     build_rotated_profile_from_study_area,
+    build_rotated_profile_from_dem_footprint,
     reproject_array_to_profile,
 )
 from ga_lem_inverter.pipeline.preprocessing import interpolate_uplift_cv, unify_array_sizes
@@ -61,7 +62,7 @@ from ga_lem_inverter.pipeline.visualization import (
     display_tiff_info,
     plot_3d_surface,
     plot_optimization_history,
-    flipped_display_array,
+    oriented_display_array,
 )
 
 
@@ -261,6 +262,7 @@ def _plot_uplift_history_summary(
     stage_multipliers: np.ndarray,
     output_path: Path,
     context: RunContext,
+    display_rotated: bool = False,
 ) -> None:
     """Save a compact visual summary of the optimized stage uplift history."""
     n_stage = int(stage_uplift.shape[0])
@@ -280,7 +282,7 @@ def _plot_uplift_history_summary(
     axes[0, 0].grid(True, alpha=0.25)
 
     total_cumulative = np.sum(cumulative_stage_uplift_km, axis=0)
-    im = axes[1, 0].imshow(flipped_display_array(total_cumulative), cmap="magma", origin="upper")
+    im = axes[1, 0].imshow(oriented_display_array(total_cumulative, rotated=display_rotated), cmap="magma", origin="upper")
     axes[1, 0].set_title("Cumulative uplift (km)")
     axes[1, 0].set_axis_off()
     fig.colorbar(im, ax=axes[1, 0], shrink=0.8)
@@ -299,7 +301,7 @@ def _plot_uplift_history_summary(
     for idx in range(n_stage):
         title = labels[idx]
         rate_im = axes[0, idx + 1].imshow(
-            flipped_display_array(stage_uplift[idx]),
+            oriented_display_array(stage_uplift[idx], rotated=display_rotated),
             cmap="RdBu_r",
             origin="upper",
             vmin=rate_vmin,
@@ -309,7 +311,7 @@ def _plot_uplift_history_summary(
         axes[0, idx + 1].set_axis_off()
 
         cum_im = axes[1, idx + 1].imshow(
-            flipped_display_array(cumulative_stage_uplift_km[idx]),
+            oriented_display_array(cumulative_stage_uplift_km[idx], rotated=display_rotated),
             cmap="magma",
             origin="upper",
             vmin=cum_vmin,
@@ -336,6 +338,7 @@ def _plot_topography_history_summary(
     context: RunContext,
     output_times_years: np.ndarray | None = None,
     total_time_years: float | None = None,
+    display_rotated: bool = False,
     max_frames: int = 6,
 ) -> None:
     """Save final-solution FastScape topography snapshots and elevation change."""
@@ -391,7 +394,7 @@ def _plot_topography_history_summary(
     for col_idx, frame_idx in enumerate(frame_indices):
         label = _frame_label(frame_idx)
         terrain_im = axes[0, col_idx].imshow(
-            flipped_display_array(series[frame_idx]),
+            oriented_display_array(series[frame_idx], rotated=display_rotated),
             cmap="terrain",
             origin="upper",
             vmin=vmin,
@@ -401,7 +404,7 @@ def _plot_topography_history_summary(
         axes[0, col_idx].set_axis_off()
 
         delta_im = axes[1, col_idx].imshow(
-            flipped_display_array(delta_series[frame_idx]),
+            oriented_display_array(delta_series[frame_idx], rotated=display_rotated),
             cmap="RdBu_r",
             origin="upper",
             vmin=-delta_limit,
@@ -899,7 +902,7 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
         else:
             study_area = None
             rotation_angle = 0.0
-            logging.info("未配置研究区 Shapefile，使用 DEM 全域且不旋转")
+            logging.info("未配置研究区 Shapefile，将尝试从 DEM 有效 footprint 自动推断旋转角。")
 
         if fault_shp_path:
             fault_lines = read_shapefile(fault_shp_path)
@@ -973,12 +976,20 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
         spacing_x = abs(dem_profile['transform'][0])
         spacing_y = abs(dem_profile['transform'][4])
         spacing = (spacing_x + spacing_y) / 2
+        display_requires_legacy_flip = False
         if study_area_shp_path and abs(rotation_angle) > 1e-9 and dem_profile.get("crs") is not None:
-            rotated_profile = build_rotated_profile_from_study_area(
+            rotated_profile = build_rotated_profile_from_study_area(dem_profile, study_area_shp_path, spacing=spacing)
+        elif not study_area_shp_path and dem_profile.get("crs") is not None:
+            rotated_profile, rotation_angle = build_rotated_profile_from_dem_footprint(
                 dem_profile,
-                study_area_shp_path,
+                dem_data,
                 spacing=spacing,
             )
+            logging.info("DEM footprint inferred rotation angle: %.4f°", rotation_angle)
+        else:
+            rotated_profile = None
+
+        if rotated_profile is not None and abs(rotation_angle) > 1e-9:
             rotated_dem_data = reproject_array_to_profile(
                 dem_data,
                 dem_profile,
@@ -996,6 +1007,7 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
         else:
             rotated_dem_data = rotate_data(dem_data, rotation_angle)
             rotated_Ksp = rotate_data(Ksp, rotation_angle)
+            display_requires_legacy_flip = abs(float(rotation_angle)) > 1e-9
 
         rotated_dem_data = fill_Nan(rotated_dem_data)
         rotated_Ksp = fill_Nan(rotated_Ksp)
@@ -1141,6 +1153,7 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
         if stages:
             ga_params['stages'] = stages
 
+        display_rotated = display_requires_legacy_flip
         model_params = {
             'Ksp': rotated_Ksp, # 使用 *旋转后* 的 Ksp
             'd_diff': config.getfloat('Model', 'd_diff_value'),
@@ -1148,7 +1161,8 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
             'area_exp': config.getfloat('Model', 'area_exp'),
             'slope_exp': config.getfloat('Model', 'slope_exp'),
             'time_total': config.getfloat('Model', 'time_total'),
-            'spacing': spacing
+            'spacing': spacing,
+            'display_rotated': display_rotated,
         }
 
         pecube_evaluator = PecubeFitnessEvaluator.from_config(
@@ -1215,14 +1229,14 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
 
         # 显示旋转后的DEM
         plt.figure(figsize=(15, 10))
-        plot_single_data(flipped_display_array(rotated_dem_data), "Rotated DEM", cmap='terrain', origin='upper')
+        plot_single_data(oriented_display_array(rotated_dem_data, rotated=display_rotated), "Rotated DEM", cmap='terrain', origin='upper')
         figure_path = context.figure_path('rotated_dem.png')
         plt.savefig(figure_path)
         context.add_artifact(figure_path)
         plt.close()
 
         # 显示侵蚀系数场
-        display_erosion_field(rotated_Ksp, shape=ORIGINAL_SHAPE, flip_display=True)
+        display_erosion_field(rotated_Ksp, shape=ORIGINAL_SHAPE, flip_display=display_rotated)
         figure_path = context.figure_path('erosion_field.png')
         plt.savefig(figure_path)
         context.add_artifact(figure_path)
@@ -1230,8 +1244,8 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
 
         #叠加显示DEM和侵蚀系数场
         plt.figure(figsize=(15, 10))
-        plt.imshow(flipped_display_array(rotated_dem_data), cmap='terrain', origin='upper')
-        plt.imshow(flipped_display_array(rotated_Ksp), cmap='RdBu_r', alpha=0.5, origin='upper')
+        plt.imshow(oriented_display_array(rotated_dem_data, rotated=display_rotated), cmap='terrain', origin='upper')
+        plt.imshow(oriented_display_array(rotated_Ksp, rotated=display_rotated), cmap='RdBu_r', alpha=0.5, origin='upper')
         plt.title("Rotated DEM with Erosion Coefficient Field")
         figure_path = context.figure_path('dem_with_erosion_field.png')
         plt.savefig(figure_path)
@@ -1242,7 +1256,7 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
         # 绘制DEM对比图
         plot_comparison(
             data1=dem_data, #  对比 *原始* DEM
-            data2=flipped_display_array(rotated_dem_data), # 和 *旋转后* DEM
+            data2=oriented_display_array(rotated_dem_data, rotated=display_rotated), # 和 *旋转后* DEM
             title1='Original DEM',
             title2='Rotated DEM',
             value1='Elevation (m)',
@@ -1259,7 +1273,7 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
         #绘制Ksp对比图
         plot_comparison(
             data1=Ksp, #  对比 *原始* Ksp
-            data2=flipped_display_array(rotated_Ksp),
+            data2=oriented_display_array(rotated_Ksp, rotated=display_rotated),
             title1='Original Ksp',
             title2='Rotated Ksp',
             value1='Erosion Coefficient',
@@ -1340,8 +1354,8 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
             best_stage_multipliers = _normalized_stage_multipliers(best_stage_multipliers, uplift_history)
             best_low_res_uplift = best_uplift_vector.reshape(LOW_RES_SHAPE)
             best_full_res_uplift = interpolate_uplift_cv(best_low_res_uplift, ORIGINAL_SHAPE)
-            display_low_res_uplift = flipped_display_array(best_low_res_uplift)
-            display_full_res_uplift = flipped_display_array(best_full_res_uplift)
+            display_low_res_uplift = oriented_display_array(best_low_res_uplift, rotated=display_rotated)
+            display_full_res_uplift = oriented_display_array(best_full_res_uplift, rotated=display_rotated)
 
             display_array_info("Best Uplift Field", best_full_res_uplift, spacing)
 
@@ -1391,8 +1405,8 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
                             f"Spearman={uplift_spearman:.4f}, RMSE={uplift_rmse:.4f}"
                         )
                         plot_comparison(
-                            data1=flipped_display_array(true_uplift_cropped),
-                            data2=flipped_display_array(best_full_res_uplift_for_metrics),
+                            data1=oriented_display_array(true_uplift_cropped, rotated=display_rotated),
+                            data2=oriented_display_array(best_full_res_uplift_for_metrics, rotated=display_rotated),
                             title1='Demo True Uplift',
                             title2='Inverted Uplift',
                             value1='Uplift Rate (mm/yr)',
@@ -1454,9 +1468,9 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
                     crop_output_border(frame, safe_border)
                     for frame in final_series_for_output
                 ])
-            display_final_elevation = flipped_display_array(final_elevation_cropped)
-            display_target_dem = flipped_display_array(target_dem_cropped)
-            display_full_res_uplift_cropped = flipped_display_array(best_full_res_uplift_cropped)
+            display_final_elevation = oriented_display_array(final_elevation_cropped, rotated=display_rotated)
+            display_target_dem = oriented_display_array(target_dem_cropped, rotated=display_rotated)
+            display_full_res_uplift_cropped = oriented_display_array(best_full_res_uplift_cropped, rotated=display_rotated)
             logging.info(
                 "输出/可视化已裁掉 Ksp 零边界: "
                 f"border={safe_border}, raw_shape={final_elevation.shape}, "
@@ -1610,6 +1624,7 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
                     stage_multipliers=best_stage_multipliers,
                     output_path=context.figure_path("uplift_history_summary.png"),
                     context=context,
+                    display_rotated=display_rotated,
                 )
             if topography_series_cropped is not None:
                 _plot_topography_history_summary(
@@ -1618,6 +1633,7 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
                     total_time_years=total_simulation_time,
                     output_path=context.figure_path("topography_history_summary.png"),
                     context=context,
+                    display_rotated=display_rotated,
                 )
 
             # 绘制3D地形可视化

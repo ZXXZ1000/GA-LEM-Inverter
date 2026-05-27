@@ -8,12 +8,12 @@ import geopandas as gpd
 import os
 import rasterio
 import geopandas as gpd
-from shapely.geometry import box
 import os
 import logging
 import rasterio
 import rasterio.mask
 import geopandas as gpd
+from rasterio.features import shapes as rasterio_shapes
 from math import ceil
 from typing import Tuple, Optional
 import logging
@@ -22,9 +22,12 @@ import numpy as np
 from scipy.ndimage import rotate
 from ga_lem_inverter.pipeline.spatial import SpatialProcessor
 import configparser
+from pathlib import Path
 from rasterio import warp
 from rasterio.transform import Affine
 from rasterio.warp import Resampling, reproject
+from shapely.geometry import Polygon, shape
+from shapely.ops import unary_union
 
 
 
@@ -128,9 +131,9 @@ def load_dem_data(file_path: str,
         elif file_ext in ['.tif', '.tiff']:
             logging.info(f"Loading TIFF file: {file_path}")
             with rasterio.open(file_path) as src:
-                dem_array = src.read(1).astype(np.float32)
+                dem_array = src.read(1, masked=True).astype(np.float32).filled(np.nan)
                 profile = src.profile.copy()
-                profile.update({'path': file_path})
+                profile.update({'path': file_path, 'dtype': 'float32', 'nodata': np.nan})
         else:
             raise ValueError(f"Unsupported file format: {file_ext}")
 
@@ -233,44 +236,52 @@ def rotate_data(data: np.ndarray, angle: float,
         raise
 
 
-def build_rotated_profile_from_study_area(
-    profile: dict,
-    study_area_shp_path: str,
-    spacing: float,
-) -> dict:
-    """
-    根据研究区最小外接旋转矩形建立一个带真实 transform 的旋转栅格 profile。
+def _rotation_angle_from_axis(x_unit: np.ndarray) -> float:
+    """返回把 x_unit 旋到正东方向所需的角度，正值表示顺时针。"""
+    angle_deg = float(np.degrees(np.arctan2(x_unit[1], x_unit[0])))
+    if angle_deg < 0:
+        angle_deg += 180.0
+    if angle_deg <= 90.0:
+        return angle_deg
+    return -(180.0 - angle_deg)
 
-    这个函数用于替代单纯的 ndarray 旋转：输出网格仍在 DEM 的 CRS 中，只是像素
-    x/y 轴沿研究区主方向排列。后续 Pecube 从该 profile 推导样品坐标时，样品点
-    和旋转后的 DEM/Ksp 会处在同一套空间参考下。
-    """
+
+def _rotated_profile_from_geometry(
+    profile: dict,
+    geometry,
+    spacing: float,
+    *,
+    label: str,
+    near_square_ratio: float = 1.05,
+) -> tuple[dict, float]:
+    """根据几何 footprint 的最小旋转矩形生成带真实 transform 的旋转栅格 profile。"""
     if "transform" not in profile or profile.get("crs") is None:
         raise ValueError("DEM profile 缺少 transform 或 CRS，无法建立旋转后的空间参考。")
     if spacing <= 0:
         raise ValueError(f"旋转栅格 spacing 必须大于 0，当前为 {spacing}。")
+    if geometry.is_empty:
+        raise ValueError(f"{label} 为空，无法建立旋转栅格。")
 
     crs = profile.get("crs")
-    study_area = read_shapefile(study_area_shp_path)
-    if study_area.crs is not None and study_area.crs != crs:
-        study_area = study_area.to_crs(crs)
-
-    geometry = study_area.geometry.union_all() if hasattr(study_area.geometry, "union_all") else study_area.geometry.unary_union
-    if geometry.is_empty:
-        raise ValueError("研究区 Shapefile 为空，无法建立旋转栅格。")
-
     rectangle = geometry.minimum_rotated_rectangle
     coords = np.asarray(rectangle.exterior.coords[:-1], dtype=float)
     if coords.shape[0] < 4:
-        raise ValueError("研究区最小外接矩形无效，无法建立旋转栅格。")
+        raise ValueError(f"{label} 最小外接矩形无效，无法建立旋转栅格。")
 
     edges = np.roll(coords, -1, axis=0) - coords
     lengths = np.linalg.norm(edges, axis=1)
     longest_index = int(np.argmax(lengths))
+    min_length = float(np.min(lengths))
+    max_length = float(np.max(lengths))
     if lengths[longest_index] <= 0:
-        raise ValueError("研究区最小外接矩形边长无效，无法建立旋转栅格。")
+        raise ValueError(f"{label} 最小外接矩形边长无效，无法建立旋转栅格。")
+    if min_length > 0 and max_length / min_length < near_square_ratio:
+        logging.info("%s footprint 近似正方形，跳过主方向旋转。", label)
+        return profile.copy(), 0.0
 
     x_unit = edges[longest_index] / lengths[longest_index]
+    if x_unit[0] < 0 or (abs(x_unit[0]) < 1e-12 and x_unit[1] < 0):
+        x_unit = -x_unit
     y_unit = np.array([-x_unit[1], x_unit[0]], dtype=float)
 
     x_projection = coords @ x_unit
@@ -280,7 +291,7 @@ def build_rotated_profile_from_study_area(
     width = max_x - min_x
     height = max_y - min_y
     if width <= 0 or height <= 0:
-        raise ValueError("研究区旋转栅格宽高无效，无法继续。")
+        raise ValueError(f"{label} 旋转栅格宽高无效，无法继续。")
 
     cols = max(2, int(ceil(width / spacing)))
     rows = max(2, int(ceil(height / spacing)))
@@ -306,7 +317,96 @@ def build_rotated_profile_from_study_area(
             "nodata": np.nan,
         }
     )
+    return rotated_profile, _rotation_angle_from_axis(x_unit)
+
+
+def build_rotated_profile_from_study_area(
+    profile: dict,
+    study_area_shp_path: str,
+    spacing: float,
+) -> dict:
+    """
+    根据研究区最小外接旋转矩形建立一个带真实 transform 的旋转栅格 profile。
+
+    这个函数用于替代单纯的 ndarray 旋转：输出网格仍在 DEM 的 CRS 中，只是像素
+    x/y 轴沿研究区主方向排列。后续 Pecube 从该 profile 推导样品坐标时，样品点
+    和旋转后的 DEM/Ksp 会处在同一套空间参考下。
+    """
+    if "transform" not in profile or profile.get("crs") is None:
+        raise ValueError("DEM profile 缺少 transform 或 CRS，无法建立旋转后的空间参考。")
+
+    crs = profile.get("crs")
+    study_area = read_shapefile(study_area_shp_path)
+    if study_area.crs is not None and study_area.crs != crs:
+        study_area = study_area.to_crs(crs)
+
+    geometry = study_area.geometry.union_all() if hasattr(study_area.geometry, "union_all") else study_area.geometry.unary_union
+    rotated_profile, _ = _rotated_profile_from_geometry(profile, geometry, spacing, label="研究区 Shapefile")
     return rotated_profile
+
+
+def build_rotated_profile_from_dem_footprint(
+    profile: dict,
+    dem_array: np.ndarray,
+    spacing: float,
+    *,
+    angle_threshold_degrees: float = 0.25,
+) -> tuple[dict, float]:
+    """
+    没有研究区 Shapefile 时，根据 DEM 自身有效数据 footprint 推断旋转网格。
+
+    对已经裁切好的 DEM，用户通常不会再提供 study_area_shp_path。此时如果 DEM 是
+    经纬度矩形投影到 UTM，目标 raster 的外接网格会保持正北，但有效 footprint 会
+    带一个小角度；这里用有效像元范围恢复这个角度，避免后续把斜 footprint 当作
+    已经转正的模型域。
+    """
+    if "transform" not in profile or profile.get("crs") is None:
+        return profile.copy(), 0.0
+    if spacing <= 0:
+        raise ValueError(f"旋转栅格 spacing 必须大于 0，当前为 {spacing}。")
+
+    transform = profile["transform"]
+    if not isinstance(transform, Affine):
+        transform = Affine(*tuple(transform)[:6])
+
+    finite_mask = np.isfinite(dem_array)
+    if np.any(finite_mask):
+        mask_image = finite_mask.astype(np.uint8)
+        geometries = [
+            shape(geometry)
+            for geometry, value in rasterio_shapes(mask_image, mask=finite_mask, transform=transform)
+            if int(value) == 1
+        ]
+        geometry = unary_union(geometries) if geometries else None
+    else:
+        geometry = None
+
+    if geometry is None or geometry.is_empty:
+        height = int(profile.get("height", dem_array.shape[0]))
+        width = int(profile.get("width", dem_array.shape[1]))
+        corners = [
+            transform * (0, 0),
+            transform * (width, 0),
+            transform * (width, height),
+            transform * (0, height),
+        ]
+        geometry = Polygon(corners)
+
+    rotated_profile, rotation_angle = _rotated_profile_from_geometry(
+        profile,
+        geometry,
+        spacing,
+        label="DEM",
+        near_square_ratio=1.001,
+    )
+    if abs(rotation_angle) < angle_threshold_degrees:
+        logging.info(
+            "DEM footprint inferred rotation %.4f° below threshold %.4f°; skip rotation.",
+            rotation_angle,
+            angle_threshold_degrees,
+        )
+        return profile.copy(), 0.0
+    return rotated_profile, rotation_angle
 
 
 def reproject_array_to_profile(
@@ -589,6 +689,31 @@ def load_and_process_data(dem_path: str,
         raise
 
 
+def _reprojection_output_path(paths_section, file_path: str, config_key: str) -> str:
+    """把重投影中间文件写到配置输出目录，避免依赖输入文件所在目录可写。"""
+    output_root = str(paths_section.get("output_path", "")).strip()
+    if output_root.lower() in {"", "none", "null", "skip", "false", "0"}:
+        output_root = str(Path.cwd() / "outputs")
+
+    output_dir = Path(output_root).expanduser() / "reprojected_inputs"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    source = Path(file_path)
+    return str(output_dir / f"{source.stem}_{config_key}_reprojected{source.suffix}")
+
+
+def _normalize_reprojected_raster_profile(profile: dict) -> dict:
+    """清理源 GeoTIFF profile 中与新写入布局不兼容的 GDAL 参数。"""
+    normalized = profile.copy()
+    tiled = str(normalized.get("tiled", "")).strip().lower() in {"yes", "true", "1"}
+    if not tiled:
+        normalized.pop("blockxsize", None)
+        normalized.pop("blockysize", None)
+    normalized.pop("compress", None)
+    normalized.pop("interleave", None)
+    return normalized
+
+
 def reproject_files_to_geographic(config: configparser.ConfigParser, target_crs: str) -> configparser.ConfigParser:
     """
     检查并重新投影输入文件到指定的**目标坐标系**，如果需要的话。
@@ -621,7 +746,7 @@ def reproject_files_to_geographic(config: configparser.ConfigParser, target_crs:
                     current_crs = src.crs
                     if current_crs and current_crs != target_crs:
                         logging.info(f"重新投影栅格文件 {file_path} 从 {current_crs.to_string()} 到 {target_crs}")
-                        output_path = os.path.splitext(file_path)[0] + "_reprojected.tif"
+                        output_path = _reprojection_output_path(paths_section, file_path, config_key)
 
                         # 计算目标坐标系的 transform, width, height
                         dst_crs = target_crs
@@ -629,24 +754,32 @@ def reproject_files_to_geographic(config: configparser.ConfigParser, target_crs:
                             src.crs, dst_crs, src.width, src.height, *src.bounds)
 
                         # 更新 profile
-                        profile = src.profile.copy()
+                        profile = _normalize_reprojected_raster_profile(src.profile)
                         profile.update({
                             'crs': dst_crs,
                             'transform': dst_transform,
                             'width': dst_width,
-                            'height': dst_height
+                            'height': dst_height,
+                            'dtype': 'float32',
+                            'nodata': np.nan,
                         })
 
                         with rasterio.open(output_path, 'w', **profile) as dst:
                             for i in range(1, src.count + 1):
+                                source = src.read(i, masked=True).astype(np.float32).filled(np.nan)
+                                destination = np.full((dst_height, dst_width), np.nan, dtype=np.float32)
                                 warp.reproject(
-                                    source=rasterio.band(src, i),
-                                    destination=rasterio.band(dst, i),
+                                    source=source,
+                                    destination=destination,
                                     src_transform=src.transform,
                                     src_crs=current_crs,
+                                    src_nodata=np.nan,
                                     dst_transform=dst_transform, # 使用计算出的 dst_transform
                                     dst_crs=dst_crs,
+                                    dst_nodata=np.nan,
+                                    init_dest_nodata=True,
                                     resampling=warp.Resampling.bilinear)
+                                dst.write(destination, i)
                         config['Paths'][config_key] = output_path # 更新配置文件中的路径
                         logging.info(f"已保存重新投影的文件到 {output_path}")
                     else:
@@ -657,7 +790,7 @@ def reproject_files_to_geographic(config: configparser.ConfigParser, target_crs:
                 current_crs = gdf.crs
                 if current_crs and current_crs != target_crs:
                     logging.info(f"重新投影Shapefile {file_path} 从 {current_crs} 到 {target_crs}")
-                    output_path = os.path.splitext(file_path)[0] + "_reprojected.shp"
+                    output_path = _reprojection_output_path(paths_section, file_path, config_key)
                     gdf_reprojected = gdf.to_crs(target_crs)
                     gdf_reprojected.to_file(output_path, encoding='utf-8') # 明确指定UTF-8编码
                     config['Paths'][config_key] = output_path # 更新配置文件路径
