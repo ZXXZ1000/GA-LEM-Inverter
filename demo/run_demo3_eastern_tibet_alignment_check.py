@@ -4,7 +4,7 @@
 - 下载/生成一个小范围真实 DEM；
 - 从 GMT 中文手册 CN-faults 数据中裁出岷江-龙门山-四川盆地西缘断层；
 - 创建一个旋转研究区 polygon；
-- 按当前主流程把 DEM、Ksp 和研究区同步旋转到同一个 georeferenced grid；
+- 按当前主流程旋转 DEM，并在最终 georeferenced grid 上重新生成 Ksp；
 - 输出可视化图和 summary，检查是否错位、变形、残留 NoData。
 """
 
@@ -41,7 +41,7 @@ from ga_lem_inverter.pipeline.data import (
     reproject_array_to_profile,
 )
 from ga_lem_inverter.pipeline.erosion import create_erosion_field
-from ga_lem_inverter.workflows.main_inversion import fill_Nan
+from ga_lem_inverter.workflows.main_inversion import create_model_grid_erosion_field, fill_Nan
 
 
 DATA_DIR = ROOT / "demo" / "data" / "demo3"
@@ -308,7 +308,15 @@ def _run_alignment_check(dem_path: Path, study_area_path: Path, fault_path: Path
     )
     rotated_profile = build_rotated_profile_from_study_area(profile, str(study_area_path), spacing=spacing)
     rotated_dem = fill_Nan(reproject_array_to_profile(dem, profile, rotated_profile, resampling=Resampling.bilinear))
-    rotated_ksp = fill_Nan(reproject_array_to_profile(ksp, profile, rotated_profile, resampling=Resampling.bilinear))
+    rotated_ksp = create_model_grid_erosion_field(
+        shape=rotated_dem.shape,
+        base_k_sp=1.0e-6,
+        fault_k_sp=5.0e-6,
+        fault_shp_path=str(fault_path),
+        study_area_shp_path=str(study_area_path),
+        dem_profile=rotated_profile,
+        border_width=2,
+    )
 
     _save_array(DATA_DIR / "demo3_rotated_dem.npy", rotated_dem)
     _save_array(DATA_DIR / "demo3_rotated_ksp.npy", rotated_ksp)
@@ -396,7 +404,7 @@ def _plot_alignment(
     axes[1, 0].imshow(np.fliplr(np.flipud(rotated_dem)), cmap="terrain")
     axes[1, 0].set_title(f"Rotated filled DEM {rotated_dem.shape}")
     axes[1, 1].imshow(np.fliplr(np.flipud(rotated_ksp)), cmap="magma")
-    axes[1, 1].set_title("Rotated Ksp")
+    axes[1, 1].set_title("Rotated-grid Ksp")
     for ax in axes.ravel():
         ax.set_xticks([])
         ax.set_yticks([])

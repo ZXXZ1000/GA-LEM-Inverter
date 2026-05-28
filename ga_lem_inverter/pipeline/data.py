@@ -30,6 +30,21 @@ from shapely.geometry import Polygon, shape
 from shapely.ops import unary_union
 
 
+def _profile_x_axis_unit(profile: dict) -> np.ndarray:
+    """Return the positive source-raster x-axis direction in map coordinates."""
+    transform = profile["transform"]
+    if not isinstance(transform, Affine):
+        transform = Affine(*tuple(transform)[:6])
+    x_axis = np.array([transform.a, transform.d], dtype=float)
+    norm = float(np.linalg.norm(x_axis))
+    if norm <= 0:
+        return np.array([1.0, 0.0], dtype=float)
+    x_axis = x_axis / norm
+    if x_axis[0] < 0 or (abs(x_axis[0]) < 1e-12 and x_axis[1] < 0):
+        x_axis = -x_axis
+    return x_axis
+
+
 
 def clip_dem_with_shapefile(dem_data: np.ndarray, dem_profile: dict,
                           shp_path: str) -> Tuple[np.ndarray, dict]:
@@ -253,6 +268,7 @@ def _rotated_profile_from_geometry(
     *,
     label: str,
     near_square_ratio: float = 1.05,
+    x_axis_strategy: str = "longest",
 ) -> tuple[dict, float]:
     """根据几何 footprint 的最小旋转矩形生成带真实 transform 的旋转栅格 profile。"""
     if "transform" not in profile or profile.get("crs") is None:
@@ -270,18 +286,31 @@ def _rotated_profile_from_geometry(
 
     edges = np.roll(coords, -1, axis=0) - coords
     lengths = np.linalg.norm(edges, axis=1)
-    longest_index = int(np.argmax(lengths))
-    min_length = float(np.min(lengths))
-    max_length = float(np.max(lengths))
-    if lengths[longest_index] <= 0:
+    valid_edges = lengths > 0
+    if not np.any(valid_edges):
         raise ValueError(f"{label} 最小外接矩形边长无效，无法建立旋转栅格。")
+    min_length = float(np.min(lengths[valid_edges]))
+    max_length = float(np.max(lengths[valid_edges]))
     if min_length > 0 and max_length / min_length < near_square_ratio:
         logging.info("%s footprint 近似正方形，跳过主方向旋转。", label)
         return profile.copy(), 0.0
 
-    x_unit = edges[longest_index] / lengths[longest_index]
-    if x_unit[0] < 0 or (abs(x_unit[0]) < 1e-12 and x_unit[1] < 0):
-        x_unit = -x_unit
+    if x_axis_strategy == "source_x":
+        source_x_unit = _profile_x_axis_unit(profile)
+        candidate_indices = np.where(valid_edges)[0]
+        candidate_units = np.asarray([edges[idx] / lengths[idx] for idx in candidate_indices])
+        scores = np.abs(candidate_units @ source_x_unit)
+        selected_index = int(candidate_indices[int(np.argmax(scores))])
+        x_unit = edges[selected_index] / lengths[selected_index]
+        if float(np.dot(x_unit, source_x_unit)) < 0:
+            x_unit = -x_unit
+    elif x_axis_strategy == "longest":
+        longest_index = int(np.argmax(lengths))
+        x_unit = edges[longest_index] / lengths[longest_index]
+        if x_unit[0] < 0 or (abs(x_unit[0]) < 1e-12 and x_unit[1] < 0):
+            x_unit = -x_unit
+    else:
+        raise ValueError(f"未知旋转轴选择策略: {x_axis_strategy}")
     y_unit = np.array([-x_unit[1], x_unit[0]], dtype=float)
 
     x_projection = coords @ x_unit
@@ -359,6 +388,10 @@ def build_rotated_profile_from_dem_footprint(
     经纬度矩形投影到 UTM，目标 raster 的外接网格会保持正北，但有效 footprint 会
     带一个小角度；这里用有效像元范围恢复这个角度，避免后续把斜 footprint 当作
     已经转正的模型域。
+
+    和 study-area shapefile 不同，这里不会强制把最长边转成 X 轴。用户直接给一个
+    已裁切 DEM 时，Y 方向长于 X 方向是合法的模型域形状；强制最长边横放会造成
+    不必要的 90 度旋转。
     """
     if "transform" not in profile or profile.get("crs") is None:
         return profile.copy(), 0.0
@@ -398,6 +431,7 @@ def build_rotated_profile_from_dem_footprint(
         spacing,
         label="DEM",
         near_square_ratio=1.001,
+        x_axis_strategy="source_x",
     )
     if abs(rotation_angle) < angle_threshold_degrees:
         logging.info(

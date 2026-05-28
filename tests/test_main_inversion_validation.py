@@ -3,10 +3,13 @@ from types import SimpleNamespace
 from unittest import mock
 
 import numpy as np
+from rasterio.warp import Resampling
 
 from ga_lem_inverter.config import UserConfigError
 from ga_lem_inverter.workflows.main_inversion import (
     create_objective_function,
+    _reproject_rotated_dem,
+    create_model_grid_erosion_field,
     validate_low_resolution_shape,
     validate_rotation_spatial_constraints,
 )
@@ -59,6 +62,42 @@ class MainInversionValidationAcceptanceTests(unittest.TestCase):
 
         self.assertFalse(metrics["dem_rotated"])
         self.assertEqual(metrics["spatial_reference_mode"], "dem_georeferenced")
+
+    def test_rotated_dem_reprojection_does_not_reproject_ksp(self):
+        """产品验收：旋转只重采样 DEM；Ksp 必须在最终模型网格上重新生成。"""
+        dem = np.ones((3, 4), dtype=float)
+        src_profile = {"height": 3, "width": 4, "transform": object(), "crs": "EPSG:32648"}
+        dst_profile = {"height": 4, "width": 3, "transform": object(), "crs": "EPSG:32648"}
+
+        with mock.patch(
+            "ga_lem_inverter.workflows.main_inversion.reproject_array_to_profile",
+            return_value=np.full((4, 3), 1.0),
+        ) as reproject_mock:
+            rotated_dem = _reproject_rotated_dem(dem, src_profile, dst_profile)
+
+        self.assertEqual(rotated_dem.shape, (4, 3))
+        reproject_mock.assert_called_once()
+        self.assertEqual(reproject_mock.call_args.kwargs["resampling"], Resampling.bilinear)
+
+    def test_dem_only_model_grid_ksp_is_uniform_without_interpolated_edge_fill(self):
+        """产品验收：无断层时 rotated Ksp 内部必须是均一 base 值，不能有插值补边渐变。"""
+        ksp = create_model_grid_erosion_field(
+            shape=(7, 9),
+            base_k_sp=2.5,
+            fault_k_sp=9.0,
+            fault_shp_path=None,
+            study_area_shp_path=None,
+            dem_profile={"transform": object(), "crs": "EPSG:32648"},
+            border_width=2,
+        )
+
+        self.assertEqual(ksp.shape, (7, 9))
+        self.assertTrue(np.all(ksp[:2, :] == 0.0))
+        self.assertTrue(np.all(ksp[-2:, :] == 0.0))
+        self.assertTrue(np.all(ksp[:, :2] == 0.0))
+        self.assertTrue(np.all(ksp[:, -2:] == 0.0))
+        self.assertTrue(np.all(ksp[2:-2, 2:-2] == 2.5))
+        self.assertEqual(set(np.unique(ksp)), {0.0, 2.5})
 
     def test_pecube_objective_uses_fastscape_series_for_terrain_and_thermo(self):
         """产品验收：启用 Pecube 时 FastScape 序列最后一帧用于地形 loss，完整序列送入热史约束。"""

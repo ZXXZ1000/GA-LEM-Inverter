@@ -20,7 +20,7 @@ from ga_lem_inverter.pipeline.data import (
     reproject_files_to_geographic,
 )
 from ga_lem_inverter.pipeline.erosion import create_erosion_field
-from ga_lem_inverter.workflows.main_inversion import fill_Nan
+from ga_lem_inverter.workflows.main_inversion import create_model_grid_erosion_field, fill_Nan
 
 
 class RotatedGeoreferencingAcceptanceTests(unittest.TestCase):
@@ -41,9 +41,16 @@ class RotatedGeoreferencingAcceptanceTests(unittest.TestCase):
 
             rotated_profile = build_rotated_profile_from_study_area(profile, str(path), spacing=10.0)
             dem = np.arange(10000, dtype=np.float32).reshape(100, 100)
-            ksp = np.ones((100, 100), dtype=np.float32)
             rotated_dem = reproject_array_to_profile(dem, profile, rotated_profile)
-            rotated_ksp = reproject_array_to_profile(ksp, profile, rotated_profile)
+            rotated_ksp = create_model_grid_erosion_field(
+                shape=rotated_dem.shape,
+                base_k_sp=1.0,
+                fault_k_sp=4.0,
+                fault_shp_path=None,
+                study_area_shp_path=None,
+                dem_profile=rotated_profile,
+                border_width=1,
+            )
 
         transform = rotated_profile["transform"]
         self.assertEqual(rotated_dem.shape, rotated_ksp.shape)
@@ -53,7 +60,8 @@ class RotatedGeoreferencingAcceptanceTests(unittest.TestCase):
         self.assertTrue(np.isfinite(rotated_dem).any())
         self.assertTrue(np.isfinite(rotated_ksp).any())
         self.assertFalse(np.isnan(fill_Nan(rotated_dem)).any())
-        self.assertFalse(np.isnan(fill_Nan(rotated_ksp)).any())
+        self.assertFalse(np.isnan(rotated_ksp).any())
+        self.assertEqual(set(np.unique(rotated_ksp)), {0.0, 1.0})
 
     def test_rotated_projected_profile_can_drive_pecube_auto_grid(self):
         """产品验收：Pecube 自动坐标必须能读取旋转后的投影 affine 并生成经纬度输出网格。"""
@@ -152,6 +160,40 @@ class RotatedGeoreferencingAcceptanceTests(unittest.TestCase):
         self.assertGreater(boosted_pixels.shape[0], 0)
         self.assertLess(abs(float(np.median(boosted_pixels[:, 1])) - 50.0), 2.0)
 
+    def test_fault_ksp_rasterizes_directly_on_rotated_model_grid(self):
+        """产品验收：rotated Ksp 必须在最终网格原生生成，不应出现重采样中间值。"""
+        profile = {
+            "crs": "EPSG:32648",
+            "transform": from_origin(0.0, 1000.0, 10.0, 10.0),
+            "height": 100,
+            "width": 100,
+            "dtype": "float32",
+        }
+        study_area = rotate(box(200.0, 300.0, 720.0, 560.0), 28.0, origin="centroid")
+        fault_line = LineString([study_area.centroid.coords[0], (study_area.centroid.x + 250.0, study_area.centroid.y)])
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            study_path = Path(tmpdir) / "study_area.shp"
+            fault_path = Path(tmpdir) / "fault.shp"
+            gpd.GeoDataFrame({"id": [1]}, geometry=[study_area], crs="EPSG:32648").to_file(study_path)
+            gpd.GeoDataFrame({"id": [1]}, geometry=[fault_line], crs="EPSG:32648").to_file(fault_path)
+            rotated_profile = build_rotated_profile_from_study_area(profile, str(study_path), spacing=10.0)
+
+            ksp = create_model_grid_erosion_field(
+                shape=(rotated_profile["height"], rotated_profile["width"]),
+                base_k_sp=1.0,
+                fault_k_sp=4.0,
+                fault_shp_path=str(fault_path),
+                study_area_shp_path=str(study_path),
+                dem_profile=rotated_profile,
+                border_width=1,
+            )
+
+        self.assertEqual(ksp.shape, (rotated_profile["height"], rotated_profile["width"]))
+        self.assertFalse(np.isnan(ksp).any())
+        self.assertGreater(np.count_nonzero(ksp > 1.0), 0)
+        self.assertTrue(set(np.unique(ksp)).issubset({0.0, 1.0, 5.0}))
+
     def test_reprojected_raster_writes_outside_footprint_as_nan(self):
         """产品验收：经纬度 DEM 投影到 UTM 后，外接网格空白区必须是 NaN 而不是 0 海拔。"""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -233,6 +275,25 @@ class RotatedGeoreferencingAcceptanceTests(unittest.TestCase):
         self.assertNotAlmostEqual(rotated_profile["transform"].b, 0.0)
         self.assertNotAlmostEqual(rotated_profile["transform"].d, 0.0)
         self.assertLess(rotated_profile["height"], profile["height"])
+
+    def test_tall_dem_footprint_does_not_force_90_degree_rotation(self):
+        """产品验收：DEM 有效区只是高大于宽时，不应为了长边横放而顺时针转 90 度。"""
+        profile = {
+            "crs": "EPSG:32647",
+            "transform": from_origin(300000.0, 5400000.0, 30.0, 30.0),
+            "height": 180,
+            "width": 90,
+            "dtype": "float32",
+            "nodata": np.nan,
+        }
+        dem = np.full((180, 90), np.nan, dtype=np.float32)
+        dem[20:160, 25:65] = 2500.0
+
+        rotated_profile, rotation_angle = build_rotated_profile_from_dem_footprint(profile, dem, spacing=30.0)
+
+        self.assertEqual(rotation_angle, 0.0)
+        self.assertAlmostEqual(rotated_profile["transform"].b, 0.0)
+        self.assertAlmostEqual(rotated_profile["transform"].d, 0.0)
 
     @staticmethod
     def _write_samples(path: Path, x: float, y: float) -> None:

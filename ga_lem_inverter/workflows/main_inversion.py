@@ -14,6 +14,9 @@ import warnings
 from datetime import datetime
 import sys
 from scipy.stats import pearsonr, spearmanr
+from pyproj import Transformer
+from rasterio.crs import CRS
+from rasterio.transform import Affine
 # 过滤所有警告
 warnings.filterwarnings('ignore')
 # 特定警告过滤
@@ -57,7 +60,6 @@ from ga_lem_inverter.pipeline.visualization import (
     plot_comparison,
     plot_uplift_distribution_x,
     plot_uplift_distribution_y,
-    plot_single_data,
     display_array_info,
     display_tiff_info,
     plot_3d_surface,
@@ -498,6 +500,166 @@ def validate_rotation_spatial_constraints(
     }
 
 
+def _reproject_rotated_dem(
+    dem_data: np.ndarray,
+    src_profile: dict,
+    dst_profile: dict,
+) -> np.ndarray:
+    """Reproject DEM as a continuous elevation surface."""
+    return reproject_array_to_profile(
+        dem_data,
+        src_profile,
+        dst_profile,
+        resampling=Resampling.bilinear,
+    )
+
+
+def _profile_affine(profile: dict) -> Affine | None:
+    transform = profile.get("transform")
+    if transform is None:
+        return None
+    return transform if isinstance(transform, Affine) else Affine(*tuple(transform)[:6])
+
+
+def _thermo_observation_pixels_for_profile(
+    observations: list[Any],
+    profile: dict,
+    shape: tuple[int, int],
+    *,
+    display_rotated: bool = False,
+) -> list[dict[str, Any]]:
+    """Project loaded thermochronology observations back onto a DEM pixel view."""
+    if not observations:
+        return []
+    affine = _profile_affine(profile)
+    crs = profile.get("crs")
+    if affine is None or crs is None:
+        return []
+
+    try:
+        crs_obj = CRS.from_user_input(crs)
+        transformer = None
+        if crs_obj.to_epsg() != 4326:
+            transformer = Transformer.from_crs("EPSG:4326", crs_obj, always_xy=True)
+    except Exception as exc:
+        logging.warning("无法为样品点建立 DEM 坐标转换，跳过样品点叠加: %s", exc)
+        return []
+
+    rows, cols = int(shape[0]), int(shape[1])
+    inverse = ~affine
+    points: list[dict[str, Any]] = []
+    seen: set[tuple[str, int, int]] = set()
+    for observation in observations:
+        try:
+            lon = float(observation.x)
+            lat = float(observation.y)
+            map_x, map_y = transformer.transform(lon, lat) if transformer is not None else (lon, lat)
+            col, row = inverse * (map_x, map_y)
+            pixel_x = float(col) - 0.5
+            pixel_y = float(row) - 0.5
+            if display_rotated:
+                pixel_x = cols - 1 - pixel_x
+                pixel_y = rows - 1 - pixel_y
+        except Exception:
+            continue
+        if not (0.0 <= pixel_x < cols and 0.0 <= pixel_y < rows):
+            continue
+        key = (str(observation.sample_id), int(round(pixel_x * 1000)), int(round(pixel_y * 1000)))
+        if key in seen:
+            continue
+        seen.add(key)
+        points.append(
+            {
+                "sample_id": str(observation.sample_id),
+                "x": pixel_x,
+                "y": pixel_y,
+                "observed_age": float(observation.observed_age),
+                "system": str(observation.system),
+            }
+        )
+    return points
+
+
+def _overlay_sample_points(ax: plt.Axes, sample_points: list[dict[str, Any]] | None) -> None:
+    if not sample_points:
+        return
+    xs = [float(point["x"]) for point in sample_points]
+    ys = [float(point["y"]) for point in sample_points]
+    ages = [float(point["observed_age"]) for point in sample_points]
+    scatter = ax.scatter(
+        xs,
+        ys,
+        c=ages,
+        cmap="plasma",
+        s=42,
+        edgecolors="black",
+        linewidths=0.6,
+        zorder=5,
+    )
+    for index, point in enumerate(sample_points):
+        dy = -8 if index % 2 == 0 else 8
+        ax.annotate(
+            f"{point['sample_id']}\n{float(point['observed_age']):g} Ma",
+            xy=(float(point["x"]), float(point["y"])),
+            xytext=(6, dy),
+            textcoords="offset points",
+            fontsize=7,
+            color="black",
+            bbox={"boxstyle": "round,pad=0.18", "facecolor": "white", "edgecolor": "0.75", "alpha": 0.82},
+            arrowprops={"arrowstyle": "-", "color": "0.25", "linewidth": 0.6},
+            zorder=6,
+        )
+    ax.figure.colorbar(scatter, ax=ax, fraction=0.045, pad=0.03, label="Observed age (Ma)")
+
+
+def _plot_dem_with_sample_points(
+    dem: np.ndarray,
+    *,
+    title: str,
+    path: Path,
+    context: RunContext,
+    sample_points: list[dict[str, Any]] | None = None,
+    display_rotated: bool = False,
+) -> None:
+    fig, ax = plt.subplots(figsize=(10, 8), dpi=300, constrained_layout=True)
+    image = ax.imshow(oriented_display_array(dem, rotated=display_rotated), cmap="terrain", origin="upper")
+    ax.set_title(title, fontsize=16, weight="bold", fontstyle="italic")
+    ax.set_xlabel("X", fontsize=14, weight="bold", fontstyle="italic")
+    ax.set_ylabel("Y", fontsize=14, weight="bold", fontstyle="italic")
+    fig.colorbar(image, ax=ax, fraction=0.045, pad=0.03, label="Elevation (m)")
+    _overlay_sample_points(ax, sample_points)
+    fig.savefig(path)
+    context.add_artifact(path)
+    plt.close(fig)
+
+
+def _plot_dem_sample_comparison(
+    original_dem: np.ndarray,
+    rotated_dem: np.ndarray,
+    *,
+    path: Path,
+    context: RunContext,
+    original_points: list[dict[str, Any]] | None = None,
+    rotated_points: list[dict[str, Any]] | None = None,
+    display_rotated: bool = False,
+) -> None:
+    fig, axes = plt.subplots(1, 2, figsize=(15, 7), dpi=220, constrained_layout=True)
+    panels = (
+        (axes[0], original_dem, "Original DEM + age samples", original_points, False),
+        (axes[1], rotated_dem, "Rotated DEM + age samples", rotated_points, display_rotated),
+    )
+    for ax, dem, title, points, rotate_display in panels:
+        image = ax.imshow(oriented_display_array(dem, rotated=rotate_display), cmap="terrain", origin="upper")
+        ax.set_title(title)
+        ax.set_xlabel("X")
+        ax.set_ylabel("Y")
+        fig.colorbar(image, ax=ax, fraction=0.045, pad=0.03, label="Elevation (m)")
+        _overlay_sample_points(ax, points)
+    fig.savefig(path)
+    context.add_artifact(path)
+    plt.close(fig)
+
+
 def _json_metric_value(value):
     if isinstance(value, (int, float, np.integer, np.floating)):
         return float(value)
@@ -821,6 +983,60 @@ def create_uniform_erosion_field(shape, base_k_sp, border_width=2):
         ksp[:, -safe_border:] = 0
     return ksp
 
+
+def _apply_ksp_border(ksp: np.ndarray, border_width: int = 2) -> tuple[np.ndarray, int]:
+    """Apply FastScape zero boundary rows/columns and return the effective width."""
+    bordered = np.asarray(ksp, dtype=np.float64).copy()
+    row, col = bordered.shape
+    safe_border = min(border_width, max(row // 2, 0), max(col // 2, 0))
+    if safe_border > 0:
+        bordered[:safe_border, :] = 0
+        bordered[-safe_border:, :] = 0
+        bordered[:, :safe_border] = 0
+        bordered[:, -safe_border:] = 0
+    return bordered, safe_border
+
+
+def _fill_ksp_nodata(ksp: np.ndarray, base_k_sp: float) -> np.ndarray:
+    """Fill Ksp NoData with the configured background value, not neighbor interpolation."""
+    return np.where(np.isfinite(ksp), ksp, float(base_k_sp)).astype(np.float64)
+
+
+def create_model_grid_erosion_field(
+    *,
+    shape: tuple[int, int],
+    base_k_sp: float,
+    fault_k_sp: float,
+    fault_shp_path: Optional[str],
+    study_area_shp_path: Optional[str],
+    dem_profile: dict,
+    border_width: int = 2,
+) -> np.ndarray:
+    """Create Ksp directly on the final model grid instead of rotating/interpolating an old Ksp."""
+    raster_transform = dem_profile.get("transform") if dem_profile is not None else None
+    raster_crs = dem_profile.get("crs") if dem_profile is not None else None
+    if fault_shp_path and study_area_shp_path and raster_transform is not None and raster_crs is not None:
+        ksp = create_erosion_field(
+            shape=shape,
+            base_k_sp=base_k_sp,
+            fault_k_sp=fault_k_sp,
+            fault_shp_path=fault_shp_path,
+            study_area_shp_path=study_area_shp_path,
+            rotation_angle=0,
+            border_width=border_width,
+            raster_transform=raster_transform,
+            raster_crs=raster_crs,
+        )
+        logging.info("已在最终 DEM 网格上重新栅格化断层 Ksp，未对 Ksp 做旋转插值。")
+    else:
+        ksp = create_uniform_erosion_field(shape=shape, base_k_sp=base_k_sp, border_width=border_width)
+        logging.info("已在最终 DEM 网格上创建均一 Ksp，未对 Ksp 做旋转插值。")
+
+    ksp = _fill_ksp_nodata(ksp, base_k_sp)
+    ksp, _ = _apply_ksp_border(ksp, border_width=border_width)
+    return ksp
+
+
 def run_main_workflow(config: configparser.ConfigParser, context: RunContext) -> dict[str, Any]:
     """Run the real-DEM inversion workflow in a structured run directory."""
     try:
@@ -894,6 +1110,7 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
             study_area_shp_path=study_area_shp_path,
             ratio=ratio
         )
+        original_dem_profile = dem_profile.copy()
 
         if study_area_shp_path:
             study_area = read_shapefile(study_area_shp_path)
@@ -971,12 +1188,13 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
             logging.error("侵蚀系数场验证失败")
             return
 
-        # 3. 旋转 DEM 和 Ksp Field (一起旋转)
-        logging.info("Step 3: 旋转 DEM 和侵蚀系数场")
+        # 3. 旋转 DEM，并在最终模型网格上创建 Ksp。
+        logging.info("Step 3: 旋转 DEM 并在最终网格创建侵蚀系数场")
         spacing_x = abs(dem_profile['transform'][0])
         spacing_y = abs(dem_profile['transform'][4])
         spacing = (spacing_x + spacing_y) / 2
         display_requires_legacy_flip = False
+        ksp_border_width = 2
         if study_area_shp_path and abs(rotation_angle) > 1e-9 and dem_profile.get("crs") is not None:
             rotated_profile = build_rotated_profile_from_study_area(dem_profile, study_area_shp_path, spacing=spacing)
         elif not study_area_shp_path and dem_profile.get("crs") is not None:
@@ -990,27 +1208,46 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
             rotated_profile = None
 
         if rotated_profile is not None and abs(rotation_angle) > 1e-9:
-            rotated_dem_data = reproject_array_to_profile(
+            rotated_dem_data = _reproject_rotated_dem(
                 dem_data,
                 dem_profile,
                 rotated_profile,
-                resampling=Resampling.bilinear,
-            )
-            rotated_Ksp = reproject_array_to_profile(
-                Ksp,
-                dem_profile,
-                rotated_profile,
-                resampling=Resampling.bilinear,
             )
             dem_profile = rotated_profile
-            logging.info("已使用带 transform 的旋转投影网格同步重采样 DEM 和 Ksp。")
+            logging.info("已使用带 transform 的旋转投影网格重采样 DEM；Ksp 将在最终网格上重新生成。")
+        elif rotated_profile is not None:
+            rotated_dem_data = dem_data.copy()
+            dem_profile = rotated_profile
+            logging.info("DEM 不需要旋转，保留原始网格；Ksp 将在当前模型网格上重新生成。")
+        elif abs(float(rotation_angle)) <= 1e-9:
+            rotated_dem_data = dem_data.copy()
+            logging.info("DEM 不需要旋转，保留原始数组网格。")
         else:
             rotated_dem_data = rotate_data(dem_data, rotation_angle)
-            rotated_Ksp = rotate_data(Ksp, rotation_angle)
             display_requires_legacy_flip = abs(float(rotation_angle)) > 1e-9
 
         rotated_dem_data = fill_Nan(rotated_dem_data)
-        rotated_Ksp = fill_Nan(rotated_Ksp)
+        if dem_profile.get("transform") is not None and dem_profile.get("crs") is not None:
+            rotated_Ksp = create_model_grid_erosion_field(
+                shape=rotated_dem_data.shape,
+                base_k_sp=k_sp_value,
+                fault_k_sp=ksp_fault,
+                fault_shp_path=fault_shp_path,
+                study_area_shp_path=study_area_shp_path,
+                dem_profile=dem_profile,
+                border_width=ksp_border_width,
+            )
+        else:
+            rotated_Ksp = rotate_data(Ksp, rotation_angle) if abs(float(rotation_angle)) > 1e-9 else Ksp.copy()
+            rotated_Ksp = _fill_ksp_nodata(rotated_Ksp, k_sp_value)
+            if rotated_Ksp.shape != rotated_dem_data.shape:
+                logging.warning(
+                    "Legacy Ksp shape=%s 与 DEM shape=%s 不一致，将用最近邻对齐。",
+                    rotated_Ksp.shape,
+                    rotated_dem_data.shape,
+                )
+                rotated_Ksp = align_model_field(rotated_Ksp, rotated_dem_data.shape, label="Ksp", order=0)
+            rotated_Ksp, _ = _apply_ksp_border(rotated_Ksp, border_width=ksp_border_width)
 
         # 添加详细的尺寸日志
         logging.info(f"Shape comparison:")
@@ -1031,7 +1268,6 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
             logging.info(f"DEM shape: {rotated_dem_data.shape}")
             logging.info(f"Ksp shape: {rotated_Ksp.shape}")
 
-        ksp_border_width = 2
         safe_border = min(
             ksp_border_width,
             max(rotated_Ksp.shape[0] // 2, 0),
@@ -1193,6 +1429,24 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
                     )
                 else:
                     logging.warning("DEM 缺少 CRS/transform，Pecube 使用 config.ini 中的 lon0/lat0/dlon/dlat。")
+        original_sample_points = _thermo_observation_pixels_for_profile(
+            pecube_evaluator.observations,
+            original_dem_profile,
+            dem_data.shape,
+            display_rotated=False,
+        )
+        rotated_sample_points = _thermo_observation_pixels_for_profile(
+            pecube_evaluator.observations,
+            dem_profile,
+            resampled_dem.shape,
+            display_rotated=display_rotated,
+        )
+        if original_sample_points or rotated_sample_points:
+            logging.info(
+                "已准备热年代学样品点叠加: original=%s, rotated=%s",
+                len(original_sample_points),
+                len(rotated_sample_points),
+            )
 
         # 创建objective function (使用 *旋转后* 的 resampled_dem 和 Ksp)
         obj_func = create_objective_function(
@@ -1220,20 +1474,25 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
         total_time_ma = total_simulation_time / 1_000_000.0
 
         # 显示原始DEM
-        plt.figure(figsize=(15, 10))
-        plot_single_data(dem_data, "Original DEM", cmap='terrain', origin='upper') # 显示 *原始* DEM
         figure_path = context.figure_path('original_dem.png')
-        plt.savefig(figure_path)
-        context.add_artifact(figure_path)
-        plt.close()
+        _plot_dem_with_sample_points(
+            dem_data,
+            title="Original DEM",
+            path=figure_path,
+            context=context,
+            sample_points=original_sample_points,
+        )
 
         # 显示旋转后的DEM
-        plt.figure(figsize=(15, 10))
-        plot_single_data(oriented_display_array(rotated_dem_data, rotated=display_rotated), "Rotated DEM", cmap='terrain', origin='upper')
         figure_path = context.figure_path('rotated_dem.png')
-        plt.savefig(figure_path)
-        context.add_artifact(figure_path)
-        plt.close()
+        _plot_dem_with_sample_points(
+            rotated_dem_data,
+            title="Rotated DEM",
+            path=figure_path,
+            context=context,
+            sample_points=rotated_sample_points,
+            display_rotated=display_rotated,
+        )
 
         # 显示侵蚀系数场
         display_erosion_field(rotated_Ksp, shape=ORIGINAL_SHAPE, flip_display=display_rotated)
@@ -1269,6 +1528,17 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
         plt.savefig(figure_path)
         context.add_artifact(figure_path)
         plt.close()
+        if original_sample_points or rotated_sample_points:
+            figure_path = context.figure_path('dem_rotation_samples_comparison.png')
+            _plot_dem_sample_comparison(
+                dem_data,
+                rotated_dem_data,
+                path=figure_path,
+                context=context,
+                original_points=original_sample_points,
+                rotated_points=rotated_sample_points,
+                display_rotated=display_rotated,
+            )
 
         #绘制Ksp对比图
         plot_comparison(

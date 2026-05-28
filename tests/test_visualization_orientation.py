@@ -5,9 +5,10 @@ from pathlib import Path
 import numpy as np
 from rasterio.transform import from_origin
 
-from ga_lem_inverter.integrations.pecube_fitness import PecubeFitnessEvaluator, ThermochronologyPrediction
+from ga_lem_inverter.integrations.pecube_fitness import PecubeFitnessEvaluator, ThermochronologyObservation, ThermochronologyPrediction
 from ga_lem_inverter.outputs import create_run_context
 from ga_lem_inverter.pipeline.visualization import flipped_display_array, oriented_display_array
+from ga_lem_inverter.workflows.main_inversion import _thermo_observation_pixels_for_profile
 import configparser
 
 
@@ -150,6 +151,29 @@ class VisualizationOrientationTests(unittest.TestCase):
         self.assertGreaterEqual(pixels[0]["y"], 0.0)
         self.assertLessEqual(pixels[0]["x"], 10.0)
         self.assertLessEqual(pixels[0]["y"], 10.0)
+
+    def test_loaded_observations_project_to_dem_pixel_overlay(self):
+        """产品验收：original/rotated DEM 诊断图能把已读取样品点投回像素位置。"""
+        observation = ThermochronologyObservation(
+            sample_id="S1",
+            x=87.0,
+            y=43.0,
+            elevation=100.0,
+            system="AHe",
+            observed_age=5.0,
+            sigma=0.5,
+        )
+        profile = {
+            "crs": "EPSG:4326",
+            "transform": from_origin(80.0, 50.0, 1.0, 1.0),
+        }
+
+        pixels = _thermo_observation_pixels_for_profile([observation], profile, (20, 20))
+
+        self.assertEqual(len(pixels), 1)
+        self.assertAlmostEqual(pixels[0]["x"], 6.5)
+        self.assertAlmostEqual(pixels[0]["y"], 6.5)
+        self.assertEqual(pixels[0]["sample_id"], "S1")
 
 
 if __name__ == "__main__":
