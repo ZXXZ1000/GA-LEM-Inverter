@@ -156,6 +156,8 @@ mode = main
 - `[Optimization] diversity_*`：控制停滞后的多样性注入，用于跳出局部最优；默认混合随机个体、当前最优扰动和地形 prior。
 - `[Optimization] mutation_*`：控制自适应变异率；停滞时可临时增加变异，但不会超过配置上限。
 - `[OptimizationStage1/2/3]`：staged 搜索的每阶段参数。后一阶段会继承前一阶段最优解，并继续围绕它搜索。
+- `[Model] rainfall_factor`：FastScape 官方 `FlowAccumulator.runoff`，表示单位面积地表径流/降雨系数。`1.0` 保持默认均一降雨；大于 `1` 表示更强径流，小于 `1` 表示更弱径流，必须为正数。这个参数不会改写 `Ksp`。
+- `[Rainfall] mode`：默认 `uniform`，使用一个常数 runoff；设为 `python` 时会加载 `rainfall_model.py` 中的 `rainfall(x, y, z, t_ma, params)`，每个 FastScape step 返回一张降雨/径流矩阵。函数里的 `t_ma` 是距今 Ma，`z` 是当前地形高程。输出图会保存 `rainfall_preview.png` 和 `fastscape_forcing_inputs.png`，便于先看降雨场再解释结果。
 - `[Model] boundary_left/right/top/bottom`：FastScape 四边边界，顺序为 `left,right,top,bottom`。`fixed_value` 表示闭合/固定边界，`core` 表示开放出水口，`looped` 表示周期边界；四项都填写时会覆盖单值 `boundary_status`。demo3 默认 `bottom = core`，其余边闭合。
 - `[Pecube] enabled`：默认 `auto`；配置了 `sample_observations` 时，`main` 模式会把 Pecube 热年代学 loss 接进 GA fitness。
 - `[Pecube] sample_observations`：热年代学样品 CSV；设为 `none` 即关闭 Pecube 约束。推荐使用 Pecube 原生宽表格式：`SAMPLE,LON,LAT,HEIGHT,AHE,DAHE,AFT,DAFT,ZHE,DZHE,ZFT,DZFT`。
@@ -172,6 +174,60 @@ mode = main
 - `[Fitness] thermo_loss_scale`：把热年代学原始 normalized RMSE 映射到 0-1 的尺度，使用平滑有界函数保留候选之间的差异。
 
 正式实验建议先用 demo 跑通，再逐步替换 DEM 和调大 GA 参数。
+
+## 降雨 / 径流模型
+
+降雨参数走 FastScape 官方 `FlowAccumulator.runoff` 输入，不会折进 `Ksp`。因此二者含义不同：
+
+- `Ksp`：河流侵蚀系数，表示岩性、断层弱化或侵蚀效率等空间差异。
+- `rainfall/runoff`：单位面积径流/降雨因子，表示水量差异，会影响汇流和河流侵蚀通量。
+
+最简单用法是均一降雨：
+
+```ini
+[Rainfall]
+mode = uniform
+value = 1.0
+```
+
+`value = 1.0` 表示 FastScape 默认均一 runoff；大于 `1` 表示更强径流，小于 `1` 表示更弱径流，但必须大于 `0`。
+
+需要空间、时间或高程相关降雨时，改成 Python 模型：
+
+```ini
+[Rainfall]
+mode = python
+module_path = ./rainfall_model.py
+function = rainfall
+dynamic = true
+min = 0.1
+max = 5.0
+base = 1.0
+```
+
+程序会加载 `module_path` 里的函数：
+
+```python
+def rainfall(x, y, z, t_ma, params):
+    ...
+    return runoff
+```
+
+函数参数含义：
+
+- `x, y`：当前 FastScape 网格坐标，单位 m，二维矩阵。
+- `z`：当前地形高程，单位 m，二维矩阵。
+- `t_ma`：距今时间，单位 Ma；`0` 表示现今。
+- `params`：`[Rainfall]` 里除 `mode/module_path/function/dynamic/min/max` 外的键值，按字符串传入，例如 `base = 1.0`。
+
+返回值约束：
+
+- 可以返回一个正数 scalar，也可以返回一个二维矩阵。
+- 如果返回矩阵，shape 必须和 `z` 完全一致，也就是当前 DEM/FastScape/Ksp 运行网格。
+- 所有值必须是有限正数，不能有 `NaN`、`Inf`、`0` 或负数。
+- `min/max` 可选；设置后会把函数输出裁剪到该范围内，并在 FastScape 动态运行和预览图中使用同一规则。
+
+项目根目录的 `rainfall_model.py` 是可直接修改的模板；非线性示例在 `demo/rainfall/nonlinear_rainfall_demo.py`，对应配置是 `demo/configs/demo3_nonlinear_rainfall_smoke.ini`。主流程会输出 `rainfall_preview.png` 和 `fastscape_forcing_inputs.png`，建议先看这两张图确认降雨场和 Ksp/DEM 的空间关系。
 
 ## GA 优化策略
 

@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -9,9 +10,11 @@ from ga_lem_inverter.pipeline.forward_model import (
     normalize_stage_multipliers,
     run_fastscape_series,
     run_fastscape_time_scaled_series,
+    validate_rainfall_factor,
     stage_edges_from_ma,
     stage_index_for_elapsed_time,
 )
+from ga_lem_inverter.pipeline.rainfall import RainfallConfig
 
 
 class ForwardModelAcceptanceTests(unittest.TestCase):
@@ -50,6 +53,93 @@ class ForwardModelAcceptanceTests(unittest.TestCase):
 
         self.assertEqual(series.shape, (3, *shape))
         self.assertTrue(np.isfinite(series).all())
+
+    def test_fastscape_series_accepts_official_runoff_rainfall_factor(self):
+        """产品验收：降雨量系数必须走 FastScape FlowAccumulator.runoff，而不是改写 Ksp。"""
+        shape = (5, 5)
+        series = run_fastscape_series(
+            k_sp=np.ones(shape, dtype=float) * 1.0e-6,
+            uplift=np.ones(shape, dtype=float) * 0.1,
+            k_diff=0.1,
+            x_size=shape[1],
+            y_size=shape[0],
+            spacing=1000.0,
+            time_total=1000.0,
+            output_steps=3,
+            rainfall_factor=2.0,
+        )
+
+        self.assertEqual(series.shape, (3, *shape))
+        self.assertTrue(np.isfinite(series).all())
+
+    def test_rainfall_factor_is_passed_as_runoff_without_rewriting_ksp(self):
+        """产品验收：降雨系数只能进入 FastScape runoff，不能折进 Ksp。"""
+        shape = (5, 5)
+        ksp = np.ones(shape, dtype=float) * 1.0e-6
+        captured = {}
+
+        class DummyXsimlab:
+            def run(self, *, model):
+                class DummyElevation:
+                    values = np.zeros((3, *shape), dtype=float)
+
+                class DummyDataset:
+                    topography__elevation = DummyElevation()
+
+                return DummyDataset()
+
+        class DummySetup:
+            xsimlab = DummyXsimlab()
+
+        def fake_create_setup(**kwargs):
+            captured.update(kwargs)
+            return DummySetup()
+
+        with patch("ga_lem_inverter.pipeline.forward_model.xs.create_setup", side_effect=fake_create_setup):
+            series = run_fastscape_series(
+                k_sp=ksp,
+                uplift=np.ones(shape, dtype=float) * 0.1,
+                k_diff=0.1,
+                x_size=shape[1],
+                y_size=shape[0],
+                spacing=1000.0,
+                time_total=1000.0,
+                output_steps=3,
+                rainfall_factor=2.0,
+            )
+
+        input_vars = captured["input_vars"]
+        self.assertEqual(series.shape, (3, *shape))
+        self.assertEqual(input_vars["drainage__runoff"], 2.0)
+        self.assertTrue(np.array_equal(input_vars["spl__k_coef"], ksp))
+
+    def test_python_rainfall_model_runs_inside_fastscape(self):
+        """产品验收：用户 Python 降雨函数应在 FastScape step 内生成 runoff 场。"""
+        shape = (5, 5)
+
+        def rainfall(x, y, z, t_ma, params):
+            return 1.0 + 0.5 * x / max(float(np.nanmax(x)), 1.0)
+
+        series = run_fastscape_series(
+            k_sp=np.ones(shape, dtype=float) * 1.0e-6,
+            uplift=np.ones(shape, dtype=float) * 0.1,
+            k_diff=0.1,
+            x_size=shape[1],
+            y_size=shape[0],
+            spacing=1000.0,
+            time_total=1000.0,
+            output_steps=3,
+            rainfall_model=RainfallConfig(mode="python", function=rainfall, params={}),
+        )
+
+        self.assertEqual(series.shape, (3, *shape))
+        self.assertTrue(np.isfinite(series).all())
+
+    def test_rainfall_factor_must_be_positive(self):
+        """产品验收：非法降雨/径流系数必须给明确错误。"""
+        self.assertEqual(validate_rainfall_factor(1.5), 1.5)
+        with self.assertRaisesRegex(ValueError, "rainfall_factor 必须为正数"):
+            validate_rainfall_factor(0.0)
 
     def test_fastscape_output_times_match_series_frames(self):
         """产品验收：地形演化图必须使用真实输出时间标签，而不是 frame 1/2/3。"""

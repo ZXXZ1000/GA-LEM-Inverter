@@ -21,6 +21,7 @@ from ga_lem_inverter.pipeline.fitness import terrain_similarity
 from ga_lem_inverter.pipeline.forward_model import boundary_status_from_config, run_fastscape_model
 from ga_lem_inverter.pipeline.optimization import optimize_uplift_ga
 from ga_lem_inverter.pipeline.preprocessing import interpolate_uplift_cv
+from ga_lem_inverter.pipeline.rainfall import rainfall_from_config
 from ga_lem_inverter.pipeline.synthetic_erosion import create_synthetic_erosion_field
 from ga_lem_inverter.pipeline.visualization import (
     plot_3d_surface,
@@ -57,7 +58,8 @@ def ga_params_from_config(config, *, pop_default: int = 2, iter_default: int = 1
     }
 
 
-def model_params_from_config(config, shape: tuple[int, int]) -> dict[str, Any]:
+def model_params_from_config(config, shape: tuple[int, int], *, base_dir: str | Path | None = None) -> dict[str, Any]:
+    rainfall_model = rainfall_from_config(config, base_dir=base_dir)
     return {
         "k_sp_base": config_float(config, "Model", "k_sp_value", 6.92e-6),
         "k_sp_fault": config_float(config, "Model", "ksp_fault", 2.0e-5),
@@ -65,6 +67,8 @@ def model_params_from_config(config, shape: tuple[int, int]) -> dict[str, Any]:
         "boundary_status": boundary_status_from_config(config),
         "area_exp": config_float(config, "Model", "area_exp", 0.43),
         "slope_exp": config_float(config, "Model", "slope_exp", 1.0),
+        "rainfall_factor": config_float(config, "Model", "rainfall_factor", 1.0),
+        "rainfall_model": rainfall_model,
         "time_total": config_float(config, "Model", "time_total", 1.0e5),
         "spacing": config_float(config, "Model", "spacing", 900.0),
         "shape": shape,
@@ -117,6 +121,8 @@ def build_objective(target_dem: np.ndarray, low_res_shape: tuple[int, int], mode
                 boundary_status=model_params["boundary_status"],
                 area_exp=model_params["area_exp"],
                 slope_exp=model_params["slope_exp"],
+                rainfall_factor=model_params["rainfall_factor"],
+                rainfall_model=model_params.get("rainfall_model"),
                 time_total=model_params["time_total"],
             )
             similarity = terrain_similarity(
@@ -164,6 +170,8 @@ def run_synthetic_case(
         boundary_status=model_params["boundary_status"],
         area_exp=model_params["area_exp"],
         slope_exp=model_params["slope_exp"],
+        rainfall_factor=model_params["rainfall_factor"],
+        rainfall_model=model_params.get("rainfall_model"),
         time_total=model_params["time_total"],
     )
 
@@ -196,6 +204,8 @@ def run_synthetic_case(
         boundary_status=model_params["boundary_status"],
         area_exp=model_params["area_exp"],
         slope_exp=model_params["slope_exp"],
+        rainfall_factor=model_params["rainfall_factor"],
+        rainfall_model=model_params.get("rainfall_model"),
         time_total=model_params["time_total"],
     )
 

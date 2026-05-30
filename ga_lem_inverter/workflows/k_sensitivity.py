@@ -130,6 +130,7 @@ class KSensitivityExperiment:
                 'boundary_status': 'fixed_value',
                 'area_exp': 0.43,
                 'slope_exp': 1,
+                'rainfall_factor': 1.0,
                 'time_total': 100e6,
                 'spacing': 900
             }
@@ -176,6 +177,7 @@ class KSensitivityExperiment:
                     boundary_status=model_params['boundary_status'],
                     area_exp=model_params['area_exp'],
                     slope_exp=model_params['slope_exp'],
+                    rainfall_factor=model_params.get('rainfall_factor', 1.0),
                     time_total=model_params['time_total']
                 )
 
@@ -265,6 +267,7 @@ class KSensitivityExperiment:
             boundary_status=model_params['boundary_status'],
             area_exp=model_params['area_exp'],
             slope_exp=model_params['slope_exp'],
+            rainfall_factor=model_params.get('rainfall_factor', 1.0),
             time_total=model_params['time_total']
         )
 
@@ -336,6 +339,7 @@ class KSensitivityExperiment:
                         boundary_status=model_params['boundary_status'],
                         area_exp=model_params['area_exp'],
                         slope_exp=model_params['slope_exp'],
+                        rainfall_factor=model_params.get('rainfall_factor', 1.0),
                         time_total=model_params['time_total']
                     )
 
@@ -836,6 +840,7 @@ class KSensitivityExperiment:
                     boundary_status=model_params['boundary_status'],
                     area_exp=model_params['area_exp'],
                     slope_exp=model_params['slope_exp'],
+                    rainfall_factor=model_params.get('rainfall_factor', 1.0),
                     time_total=model_params['time_total']
                 )
 

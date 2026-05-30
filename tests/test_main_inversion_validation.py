@@ -248,12 +248,14 @@ class MainInversionValidationAcceptanceTests(unittest.TestCase):
                 boundary_status=["fixed_value", "fixed_value", "fixed_value", "core"],
                 area_exp=0.42,
                 slope_exp=1.3,
+                rainfall_factor=1.7,
             )
             objective(np.array([0.5]))
 
         self.assertEqual(model_mock.call_args.kwargs["boundary_status"], ["fixed_value", "fixed_value", "fixed_value", "core"])
         self.assertEqual(model_mock.call_args.kwargs["area_exp"], 0.42)
         self.assertEqual(model_mock.call_args.kwargs["slope_exp"], 1.3)
+        self.assertEqual(model_mock.call_args.kwargs["rainfall_factor"], 1.7)
 
 
 if __name__ == "__main__":

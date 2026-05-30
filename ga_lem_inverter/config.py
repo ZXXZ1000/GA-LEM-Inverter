@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import configparser
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -149,7 +150,24 @@ def _validate_minimal_config(config: configparser.ConfigParser, mode: str) -> No
     if not output:
         raise UserConfigError("[Data] output_path 不能为空。请填写输出目录。")
 
+    _validate_model_parameters(config)
     _validate_pecube_time_alignment(config, mode)
+
+
+def _validate_model_parameters(config: configparser.ConfigParser) -> None:
+    if "rainfall_factor" not in config["Model"]:
+        return
+
+    try:
+        rainfall_factor = config.getfloat("Model", "rainfall_factor")
+    except ValueError as exc:
+        raise UserConfigError("[Model] rainfall_factor 必须是数字。") from exc
+
+    if not math.isfinite(rainfall_factor) or rainfall_factor <= 0:
+        raise UserConfigError(
+            "[Model] rainfall_factor 必须为正数。"
+            f"当前值为 {config.get('Model', 'rainfall_factor')}。"
+        )
 
 
 def _config_value_is_empty(value: str) -> bool:

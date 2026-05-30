@@ -98,6 +98,29 @@ class ConfigValidationAcceptanceTests(unittest.TestCase):
 
         self.assertEqual(app_config.mode, "main")
 
+    def test_rainfall_factor_must_be_positive_when_configured(self):
+        """产品验收：降雨量系数写进 config 后，非法值在启动阶段直接提示。"""
+        config_path = self._write_config(
+            """
+            [Run]
+            mode = main
+
+            [Data]
+            terrain_path = ./demo/data/demo1/demo_dem.tif
+            output_path = ./demo/outputs
+
+            [Model]
+            time_total = 2e6
+            rainfall_factor = 0
+
+            [Optimization]
+            scale_factor = 8
+            """
+        )
+
+        with self.assertRaisesRegex(UserConfigError, "rainfall_factor.*正数"):
+            load_app_config(config_path)
+
 
 if __name__ == "__main__":
     unittest.main()

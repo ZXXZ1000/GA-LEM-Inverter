@@ -55,6 +55,7 @@ from ga_lem_inverter.pipeline.forward_model import (
 )
 from ga_lem_inverter.pipeline.fitness import terrain_similarity
 from ga_lem_inverter.pipeline.optimization import optimize_uplift_ga, split_decoded_candidate
+from ga_lem_inverter.pipeline.rainfall import preview_rainfall_fields, rainfall_from_config, rainfall_metadata
 from ga_lem_inverter.pipeline.erosion import create_erosion_field, display_erosion_field, verify_erosion_field
 from ga_lem_inverter.pipeline.visualization import (
     plot_comparison,
@@ -215,6 +216,8 @@ def _run_candidate_fastscape_series(
     boundary_status,
     area_exp,
     slope_exp,
+    rainfall_factor,
+    rainfall_model,
     time_total,
     output_steps,
     uplift_history,
@@ -233,6 +236,8 @@ def _run_candidate_fastscape_series(
             boundary_status=boundary_status,
             area_exp=area_exp,
             slope_exp=slope_exp,
+            rainfall_factor=rainfall_factor,
+            rainfall_model=rainfall_model,
             time_total=time_total,
             output_steps=output_steps,
         )
@@ -248,6 +253,8 @@ def _run_candidate_fastscape_series(
         boundary_status=boundary_status,
         area_exp=area_exp,
         slope_exp=slope_exp,
+        rainfall_factor=rainfall_factor,
+        rainfall_model=rainfall_model,
         time_total=time_total,
         output_steps=output_steps,
         stage_edges_years=uplift_history["stage_edges_years"],
@@ -319,7 +326,7 @@ def _plot_uplift_history_summary(
             vmin=cum_vmin,
             vmax=cum_vmax,
         )
-        axes[1, idx + 1].set_title(f"{title}\ncumulative mm")
+        axes[1, idx + 1].set_title(f"{title}\ncumulative km")
         axes[1, idx + 1].set_axis_off()
 
     if rate_im is not None:
@@ -424,6 +431,94 @@ def _plot_topography_history_summary(
     fig.savefig(output_path, dpi=200)
     context.add_artifact(output_path)
     plt.close(fig)
+
+
+def _plot_fastscape_forcing_summary(
+    *,
+    ksp: np.ndarray,
+    rainfall_factor: float,
+    uplift: np.ndarray,
+    output_path: Path,
+    context: RunContext,
+    display_rotated: bool = False,
+) -> None:
+    """Save FastScape forcing fields with runoff separated from Ksp."""
+    ksp_display = oriented_display_array(ksp, rotated=display_rotated)
+    uplift_display = oriented_display_array(uplift, rotated=display_rotated)
+    if np.ndim(rainfall_factor) == 0:
+        rainfall_display = np.full_like(ksp_display, float(rainfall_factor), dtype=float)
+        rainfall_title = f"FlowAccumulator.runoff = {float(rainfall_factor):g}"
+    else:
+        rainfall_display = oriented_display_array(np.asarray(rainfall_factor, dtype=float), rotated=display_rotated)
+        rainfall_title = "FlowAccumulator.runoff"
+
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4.8), constrained_layout=True)
+
+    ksp_im = axes[0].imshow(ksp_display, cmap="viridis", origin="upper")
+    axes[0].set_title("Ksp")
+    axes[0].set_axis_off()
+    fig.colorbar(ksp_im, ax=axes[0], fraction=0.045, pad=0.03, label="Ksp")
+
+    rainfall_im = axes[1].imshow(rainfall_display, cmap="Blues", origin="upper", vmin=0.0)
+    axes[1].set_title(rainfall_title)
+    axes[1].set_axis_off()
+    fig.colorbar(rainfall_im, ax=axes[1], fraction=0.045, pad=0.03, label="Runoff / rainfall factor")
+
+    uplift_im = axes[2].imshow(uplift_display, cmap="RdBu_r", origin="upper")
+    axes[2].set_title("Best uplift")
+    axes[2].set_axis_off()
+    fig.colorbar(uplift_im, ax=axes[2], fraction=0.045, pad=0.03, label="Uplift rate (mm/yr)")
+
+    fig.suptitle("FastScape forcing inputs", fontsize=14)
+    fig.savefig(output_path, dpi=200)
+    context.add_artifact(output_path)
+    plt.close(fig)
+
+
+def _save_rainfall_preview_figures(
+    *,
+    rainfall_model,
+    elevation: np.ndarray,
+    shape: tuple[int, int],
+    spacing: float,
+    total_time_years: float,
+    output_path: Path,
+    context: RunContext,
+    display_rotated: bool = False,
+    times_ma: tuple[float, ...] | None = None,
+) -> dict[float, np.ndarray]:
+    """Save rainfall/runoff preview fields for selected times before present."""
+    if times_ma is None:
+        times_ma = (float(total_time_years) / 1.0e6, 0.0)
+    fields = preview_rainfall_fields(
+        rainfall_model,
+        shape=shape,
+        spacing=spacing,
+        elevation=elevation,
+        total_time_years=total_time_years,
+        times_ma=times_ma,
+    )
+    count = len(fields)
+    fig, axes = plt.subplots(1, count, figsize=(5 * count, 4.5), constrained_layout=True)
+    if count == 1:
+        axes = np.asarray([axes])
+    values = np.concatenate([field[np.isfinite(field)].ravel() for field in fields.values()])
+    vmin = float(np.nanmin(values))
+    vmax = float(np.nanmax(values))
+    if vmin == vmax:
+        vmax = vmin + max(abs(vmin) * 0.05, 1.0)
+    im = None
+    for ax, (time_ma, field) in zip(axes, fields.items()):
+        im = ax.imshow(oriented_display_array(field, rotated=display_rotated), cmap="Blues", origin="upper", vmin=vmin, vmax=vmax)
+        ax.set_title(f"{time_ma:g} Ma")
+        ax.set_axis_off()
+    if im is not None:
+        fig.colorbar(im, ax=axes.ravel().tolist(), shrink=0.8, label="Runoff / rainfall factor")
+    fig.suptitle("Rainfall/runoff preview", fontsize=14)
+    fig.savefig(output_path, dpi=200)
+    context.add_artifact(output_path)
+    plt.close(fig)
+    return fields
 
 
 def _load_json_metrics(path: Path) -> dict[str, Any]:
@@ -708,6 +803,8 @@ def create_objective_function(resampled_dem, LOW_RES_SHAPE, ORIGINAL_SHAPE,
                            total_simulation_time, terrain_resolution,
                            feature_smooth_radius, boundary_status='fixed_value',
                            area_exp=0.43, slope_exp=1, use_lpips=True,
+                           rainfall_factor=1.0,
+                           rainfall_model=None,
                            pecube_evaluator=None, pecube_time_steps=2,
                            uplift_history=None):
     """创建优化目标函数"""
@@ -735,6 +832,8 @@ def create_objective_function(resampled_dem, LOW_RES_SHAPE, ORIGINAL_SHAPE,
                     boundary_status=boundary_status,
                     area_exp=area_exp,
                     slope_exp=slope_exp,
+                    rainfall_factor=rainfall_factor,
+                    rainfall_model=rainfall_model,
                     time_total=total_simulation_time,
                     output_steps=max(2, pecube_time_steps if pecube_evaluator is not None and pecube_evaluator.enabled else 2),
                     uplift_history=uplift_history or {"enabled": False},
@@ -752,6 +851,8 @@ def create_objective_function(resampled_dem, LOW_RES_SHAPE, ORIGINAL_SHAPE,
                     boundary_status=boundary_status,
                     area_exp=area_exp,
                     slope_exp=slope_exp,
+                    rainfall_factor=rainfall_factor,
+                    rainfall_model=rainfall_model,
                     time_total=total_simulation_time
                 )
 
@@ -1396,6 +1497,8 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
             'boundary_status': boundary_status_from_config(config),
             'area_exp': config.getfloat('Model', 'area_exp'),
             'slope_exp': config.getfloat('Model', 'slope_exp'),
+            'rainfall_factor': config.getfloat('Model', 'rainfall_factor', fallback=1.0),
+            'rainfall_model': rainfall_from_config(config, base_dir=context.config_path.parent),
             'time_total': config.getfloat('Model', 'time_total'),
             'spacing': spacing,
             'display_rotated': display_rotated,
@@ -1465,6 +1568,8 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
             boundary_status=model_params["boundary_status"],
             area_exp=model_params["area_exp"],
             slope_exp=model_params["slope_exp"],
+            rainfall_factor=model_params["rainfall_factor"],
+            rainfall_model=model_params["rainfall_model"],
             use_lpips=use_lpips,
             pecube_evaluator=pecube_evaluator,
             pecube_time_steps=pecube_time_steps,
@@ -1708,6 +1813,8 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
                     boundary_status=model_params['boundary_status'],
                     area_exp=config.getfloat('Model', 'area_exp'),
                     slope_exp=config.getfloat('Model', 'slope_exp'),
+                    rainfall_factor=model_params['rainfall_factor'],
+                    rainfall_model=model_params['rainfall_model'],
                     time_total=total_simulation_time,
                     output_steps=max(2, pecube_time_steps),
                     uplift_history=uplift_history,
@@ -1727,6 +1834,8 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
                     boundary_status=model_params['boundary_status'],
                     area_exp=config.getfloat('Model', 'area_exp'),
                     slope_exp=config.getfloat('Model', 'slope_exp'),
+                    rainfall_factor=model_params['rainfall_factor'],
+                    rainfall_model=model_params['rainfall_model'],
                     time_total=total_simulation_time
                 )
             final_elevation_cropped = crop_output_border(final_elevation, safe_border)
@@ -1746,12 +1855,39 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
                 f"border={safe_border}, raw_shape={final_elevation.shape}, "
                 f"cropped_shape={final_elevation_cropped.shape}"
             )
+            rainfall_preview_fields = _save_rainfall_preview_figures(
+                rainfall_model=model_params["rainfall_model"],
+                elevation=resampled_dem,
+                shape=ORIGINAL_SHAPE,
+                spacing=spacing,
+                total_time_years=total_simulation_time,
+                output_path=context.figure_path("rainfall_preview.png"),
+                context=context,
+                display_rotated=display_rotated,
+            )
+            rainfall_present = crop_output_border(rainfall_preview_fields[min(rainfall_preview_fields)], safe_border)
+            rotated_ksp_cropped = crop_output_border(rotated_Ksp, safe_border)
+            _plot_fastscape_forcing_summary(
+                ksp=rotated_ksp_cropped,
+                rainfall_factor=rainfall_present,
+                uplift=best_full_res_uplift_cropped,
+                output_path=context.figure_path("fastscape_forcing_inputs.png"),
+                context=context,
+                display_rotated=display_rotated,
+            )
 
             # 绘制地形对比图
             terrain_pearson = pearsonr(target_dem_cropped.ravel(), final_elevation_cropped.ravel()).statistic
             terrain_spearman = spearmanr(target_dem_cropped.ravel(), final_elevation_cropped.ravel()).statistic
             terrain_rmse = float(np.sqrt(np.mean((target_dem_cropped - final_elevation_cropped) ** 2)))
+            rainfall_stats = rainfall_metadata(model_params["rainfall_model"])
+            rainfall_stats.update({
+                "rainfall_preview_min": float(np.nanmin(rainfall_present)),
+                "rainfall_preview_max": float(np.nanmax(rainfall_present)),
+                "rainfall_preview_mean": float(np.nanmean(rainfall_present)),
+            })
             demo_metrics.update({
+                **rainfall_stats,
                 'terrain_pearson': float(terrain_pearson),
                 'terrain_spearman': float(terrain_spearman),
                 'terrain_rmse': terrain_rmse,
@@ -1785,7 +1921,10 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
             metrics_txt_path = metrics_dir / 'demo_metrics.txt'
             with open(metrics_txt_path, 'w') as metrics_file:
                 for key, value in demo_metrics.items():
-                    metrics_file.write(f"{key} = {value:.6f}\n")
+                    if isinstance(value, (int, float, np.integer, np.floating)):
+                        metrics_file.write(f"{key} = {float(value):.6f}\n")
+                    else:
+                        metrics_file.write(f"{key} = {value}\n")
             context.add_artifact(metrics_txt_path)
             if pecube_evaluator.enabled:
                 if final_series_for_output is None:
@@ -1799,6 +1938,8 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
                         boundary_status=model_params['boundary_status'],
                         area_exp=config.getfloat('Model', 'area_exp'),
                         slope_exp=config.getfloat('Model', 'slope_exp'),
+                        rainfall_factor=model_params['rainfall_factor'],
+                        rainfall_model=model_params['rainfall_model'],
                         time_total=total_simulation_time,
                         output_steps=max(2, pecube_time_steps),
                         uplift_history=uplift_history,

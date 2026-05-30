@@ -119,6 +119,7 @@ class SyntheticExperiment:
                 'boundary_status': 'fixed_value',
                 'area_exp': 0.43,
                 'slope_exp': 1,
+                'rainfall_factor': 1.0,
                 'time_total': 1e5,
                 'spacing': 900
             },
@@ -243,6 +244,7 @@ class SyntheticExperiment:
                     boundary_status=model_params['boundary_status'],
                     area_exp=model_params['area_exp'],
                     slope_exp=model_params['slope_exp'],
+                    rainfall_factor=model_params.get('rainfall_factor', 1.0),
                     time_total=model_params['time_total']
                 )
 
@@ -377,6 +379,7 @@ class SyntheticExperiment:
                 boundary_status=model_params['boundary_status'],
                 area_exp=model_params['area_exp'],
                 slope_exp=model_params['slope_exp'],
+                rainfall_factor=model_params.get('rainfall_factor', 1.0),
                 time_total=model_params['time_total']
             )
             np.save(os.path.join(output_dir, 'synthetic_dem.npy'), synthetic_dem)
@@ -430,6 +433,7 @@ class SyntheticExperiment:
                     boundary_status=model_params['boundary_status'],
                     area_exp=model_params['area_exp'],
                     slope_exp=model_params['slope_exp'],
+                    rainfall_factor=model_params.get('rainfall_factor', 1.0),
                     time_total=model_params['time_total']
                 )
                 # 保存最终DEM

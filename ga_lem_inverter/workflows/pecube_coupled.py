@@ -48,7 +48,7 @@ def run_pecube_coupled_workflow(config: configparser.ConfigParser, context: RunC
     pattern = config.get("Pecube", "pattern", fallback=config.get("Synthetic", "pattern", fallback="simple"))
     true_uplift = create_synthetic_uplift(shape, pattern, seed)
     ksp = create_synthetic_erosion_field(shape=shape, base_k_sp=config_float(config, "Model", "k_sp_value", 6.92e-6))
-    model_params = model_params_from_config(config, shape)
+    model_params = model_params_from_config(config, shape, base_dir=context.config_path.parent)
 
     topographies = list(
         run_fastscape_series(
@@ -61,6 +61,8 @@ def run_pecube_coupled_workflow(config: configparser.ConfigParser, context: RunC
             boundary_status=model_params["boundary_status"],
             area_exp=model_params["area_exp"],
             slope_exp=model_params["slope_exp"],
+            rainfall_factor=model_params["rainfall_factor"],
+            rainfall_model=model_params.get("rainfall_model"),
             time_total=model_params["time_total"],
             output_steps=n_steps,
         )
