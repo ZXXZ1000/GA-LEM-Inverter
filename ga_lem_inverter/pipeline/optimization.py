@@ -1098,8 +1098,8 @@ def optimize_uplift_ga(obj_func, resampled_dem, LOW_RES_SHAPE, ORIGINAL_SHAPE,
                 ga.fitness_cache = shared_cache
             ga.init_population_based_on_terrain(
                 matrix=resampled_dem,
-                lb=encoded_lb,
-                ub=encoded_ub,
+                lb=lb_array,
+                ub=ub_array,
                 low_res_shape=LOW_RES_SHAPE,
                 noise_level=int(stage.get("terrain_noise_level", ga_params.get("terrain_noise_level", 3))),
                 random_fraction=float(stage.get("random_fraction", ga_params.get("random_fraction", 0.2))),

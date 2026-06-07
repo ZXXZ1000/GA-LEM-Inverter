@@ -175,6 +175,56 @@ class MyGATests(unittest.TestCase):
         self.assertTrue(np.all(multipliers <= 1.5 + 1e-12))
         self.assertAlmostEqual(best_y, history[-1])
 
+    def test_optimize_uplift_ga_respects_per_stage_multiplier_bounds(self):
+        """产品验收：bounded uplift history 中每个阶段的 multiplier 使用自己的搜索范围。"""
+        seen = []
+
+        def objective(candidate):
+            _, multipliers = split_decoded_candidate(candidate)
+            seen.append(multipliers.copy())
+            return float(np.mean((multipliers - np.array([0.5, 1.1, 1.7])) ** 2))
+
+        best_x, best_y, history = optimize_uplift_ga(
+            obj_func=objective,
+            resampled_dem=np.arange(4, dtype=float).reshape(2, 2),
+            LOW_RES_SHAPE=(2, 2),
+            ORIGINAL_SHAPE=(2, 2),
+            ga_params={
+                "pop": 8,
+                "max_iter": 2,
+                "search_strategy": "single",
+                "prob_cross": 0.4,
+                "prob_mut": 0.5,
+                "lb": 0.0,
+                "ub": 0.4,
+                "uplift_precision": 0.1,
+                "uplift_history_enabled": True,
+                "uplift_history_stage_count": 3,
+                "uplift_history_multiplier_min": [0.4, 0.9, 1.4],
+                "uplift_history_multiplier_max": [0.7, 1.2, 1.8],
+                "uplift_history_multiplier_precision": 0.1,
+                "decay_rate": 1.0,
+                "min_size_pop": 8,
+                "patience": 10,
+                "random_seed": 17,
+            },
+            model_params={},
+            n_jobs=1,
+            run_mode=None,
+        )
+
+        _, multipliers = split_decoded_candidate(best_x)
+        all_seen = np.asarray(seen, dtype=float)
+        self.assertEqual(multipliers.shape, (3,))
+        self.assertGreater(all_seen.shape[0], 0)
+        self.assertTrue(np.all(all_seen[:, 0] >= 0.4 - 1e-12))
+        self.assertTrue(np.all(all_seen[:, 0] <= 0.7 + 1e-12))
+        self.assertTrue(np.all(all_seen[:, 1] >= 0.9 - 1e-12))
+        self.assertTrue(np.all(all_seen[:, 1] <= 1.2 + 1e-12))
+        self.assertTrue(np.all(all_seen[:, 2] >= 1.4 - 1e-12))
+        self.assertTrue(np.all(all_seen[:, 2] <= 1.8 + 1e-12))
+        self.assertAlmostEqual(best_y, history[-1])
+
     def test_spatial_crossover_handles_small_low_resolution_shapes(self):
         """低分辨率矩阵很小时，block_size 不能变成 0。"""
         shapes = [(1, 8), (2, 2), (8, 8)]

@@ -309,6 +309,7 @@ Pecube 的 `uplift0,uplift1...` 已经承接 GA 当前候选解的隆升场，�
 [UpliftHistory]
 enabled = true
 mode = stage_multiplier
+multiplier_search_mode = free
 stage_times_ma = 10,6,3,0
 multiplier_min = 0.5
 multiplier_max = 1.5
@@ -325,6 +326,22 @@ normalize_time_weighted_mean = true
 ```
 
 `normalize_time_weighted_mean = true` 会把倍率按阶段时长归一化到加权均值为 1，因此 `U_base` 仍代表整个模拟时间窗的平均 uplift，`m_stage` 只表达早晚活动强弱。优化输出会额外保存 `figures/uplift_history_summary.png`、`arrays/stage_uplift.npy`、`arrays/cumulative_stage_uplift.npy` 和 `arrays/stage_multipliers.npy`。
+
+如果已有地质约束能限定某些阶段的活动强弱，可以使用每阶段独立范围，缩小 GA 搜索空间：
+
+```ini
+[UpliftHistory]
+enabled = true
+mode = stage_multiplier
+multiplier_search_mode = bounded
+stage_times_ma = 10,6,3,0
+stage_multiplier_min = 0.4,0.8,1.1
+stage_multiplier_max = 0.9,1.3,1.8
+multiplier_precision = 0.1
+normalize_time_weighted_mean = true
+```
+
+上例会分别约束 `10-6 Ma`、`6-3 Ma`、`3-0 Ma` 三个阶段的倍率范围。`mode = free` 和 `mode = bounded` 也可作为 `stage_multiplier + multiplier_search_mode` 的简写。
 
 为了避免优化搜索输出过大，默认 Pecube 配置采用轻量输出：
 

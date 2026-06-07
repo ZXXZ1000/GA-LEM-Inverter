@@ -153,13 +153,72 @@ def _config_float_list(config: configparser.ConfigParser, section: str, option: 
     return [float(part.strip()) for part in raw.replace(";", ",").split(",") if part.strip()]
 
 
+def _read_stage_multiplier_bounds(
+    config: configparser.ConfigParser,
+    *,
+    stage_count: int,
+    search_mode: str,
+) -> tuple[float | list[float], float | list[float]]:
+    """Read scalar or per-stage multiplier bounds for uplift history."""
+    if search_mode == "free":
+        multiplier_min = config.getfloat("UpliftHistory", "multiplier_min", fallback=0.5)
+        multiplier_max = config.getfloat("UpliftHistory", "multiplier_max", fallback=1.5)
+        if multiplier_min <= 0 or multiplier_max < multiplier_min:
+            raise UserConfigError("[UpliftHistory] multiplier_min/max 必须为正且 min <= max。")
+        return multiplier_min, multiplier_max
+
+    min_raw = config.get(
+        "UpliftHistory",
+        "stage_multiplier_min",
+        fallback=config.get("UpliftHistory", "multiplier_min", fallback="0.5"),
+    )
+    max_raw = config.get(
+        "UpliftHistory",
+        "stage_multiplier_max",
+        fallback=config.get("UpliftHistory", "multiplier_max", fallback="1.5"),
+    )
+    try:
+        multiplier_min = [float(part.strip()) for part in min_raw.replace(";", ",").split(",") if part.strip()]
+        multiplier_max = [float(part.strip()) for part in max_raw.replace(";", ",").split(",") if part.strip()]
+    except ValueError as exc:
+        raise UserConfigError(
+            "[UpliftHistory] bounded 模式下 stage_multiplier_min/max 必须是逗号分隔数字列表。"
+        ) from exc
+
+    if len(multiplier_min) != stage_count or len(multiplier_max) != stage_count:
+        raise UserConfigError(
+            "[UpliftHistory] bounded 模式下 stage_multiplier_min/max 的数量必须等于阶段数。"
+            f"当前阶段数为 {stage_count}，min 有 {len(multiplier_min)} 个，max 有 {len(multiplier_max)} 个。"
+        )
+    invalid = [
+        index + 1
+        for index, (low, high) in enumerate(zip(multiplier_min, multiplier_max))
+        if low <= 0 or high < low
+    ]
+    if invalid:
+        raise UserConfigError(
+            "[UpliftHistory] stage_multiplier_min/max 每一阶段都必须为正且 min <= max。"
+            f"配置错误阶段: {invalid}"
+        )
+    return multiplier_min, multiplier_max
+
+
 def _read_uplift_history_config(config: configparser.ConfigParser, *, time_total_years: float) -> dict[str, Any]:
     enabled = _config_bool(config, "UpliftHistory", "enabled", fallback=False)
     if not enabled:
         return {"enabled": False}
-    mode = config.get("UpliftHistory", "mode", fallback="stage_multiplier").strip().lower()
+    mode_raw = config.get("UpliftHistory", "mode", fallback="stage_multiplier").strip().lower()
+    explicit_search_mode = config.get("UpliftHistory", "multiplier_search_mode", fallback="").strip().lower()
+    if mode_raw in {"free", "bounded"}:
+        mode = "stage_multiplier"
+        search_mode = mode_raw
+    else:
+        mode = mode_raw
+        search_mode = explicit_search_mode or "free"
     if mode != "stage_multiplier":
-        raise UserConfigError("[UpliftHistory] mode 当前只支持 stage_multiplier。")
+        raise UserConfigError("[UpliftHistory] mode 当前支持 stage_multiplier、free 或 bounded。")
+    if search_mode not in {"free", "bounded"}:
+        raise UserConfigError("[UpliftHistory] multiplier_search_mode 必须是 free 或 bounded。")
     stage_times = _config_float_list(config, "UpliftHistory", "stage_times_ma", fallback=f"{time_total_years / 1e6},0")
     try:
         stage_edges = stage_edges_from_ma(stage_times, time_total_years=time_total_years)
@@ -168,16 +227,18 @@ def _read_uplift_history_config(config: configparser.ConfigParser, *, time_total
     stage_count = len(stage_times) - 1
     if stage_count < 1:
         raise UserConfigError("[UpliftHistory] stage_times_ma 至少需要形成一个阶段。")
-    multiplier_min = config.getfloat("UpliftHistory", "multiplier_min", fallback=0.5)
-    multiplier_max = config.getfloat("UpliftHistory", "multiplier_max", fallback=1.5)
     multiplier_precision = config.getfloat("UpliftHistory", "multiplier_precision", fallback=0.1)
-    if multiplier_min <= 0 or multiplier_max < multiplier_min:
-        raise UserConfigError("[UpliftHistory] multiplier_min/max 必须为正且 min <= max。")
     if multiplier_precision <= 0:
         raise UserConfigError("[UpliftHistory] multiplier_precision 必须大于 0。")
+    multiplier_min, multiplier_max = _read_stage_multiplier_bounds(
+        config,
+        stage_count=stage_count,
+        search_mode=search_mode,
+    )
     return {
         "enabled": True,
         "mode": mode,
+        "multiplier_search_mode": search_mode,
         "stage_times_ma": stage_times,
         "stage_edges_years": stage_edges,
         "stage_count": stage_count,

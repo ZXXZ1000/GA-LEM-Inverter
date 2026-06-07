@@ -8,6 +8,7 @@ from rasterio.warp import Resampling
 from ga_lem_inverter.config import UserConfigError
 from ga_lem_inverter.workflows.main_inversion import (
     create_objective_function,
+    _read_uplift_history_config,
     _reproject_rotated_dem,
     create_model_grid_erosion_field,
     validate_low_resolution_shape,
@@ -29,6 +30,45 @@ class MainInversionValidationAcceptanceTests(unittest.TestCase):
         """产品验收：scale_factor 必须是正整数。"""
         with self.assertRaisesRegex(UserConfigError, "必须 >= 1"):
             validate_low_resolution_shape((64, 64), 0)
+
+    def test_uplift_history_bounded_mode_reads_per_stage_multiplier_ranges(self):
+        """产品验收：bounded 模式允许每个时间阶段配置独立 multiplier 搜索范围。"""
+        import configparser
+
+        config = configparser.ConfigParser()
+        config["UpliftHistory"] = {
+            "enabled": "true",
+            "mode": "stage_multiplier",
+            "multiplier_search_mode": "bounded",
+            "stage_times_ma": "10,6,3,0",
+            "stage_multiplier_min": "0.4,0.8,1.1",
+            "stage_multiplier_max": "0.9,1.3,1.8",
+            "multiplier_precision": "0.1",
+        }
+
+        uplift_history = _read_uplift_history_config(config, time_total_years=10_000_000.0)
+
+        self.assertEqual(uplift_history["multiplier_search_mode"], "bounded")
+        self.assertEqual(uplift_history["stage_count"], 3)
+        self.assertEqual(uplift_history["multiplier_min"], [0.4, 0.8, 1.1])
+        self.assertEqual(uplift_history["multiplier_max"], [0.9, 1.3, 1.8])
+
+    def test_uplift_history_bounded_mode_requires_one_bound_per_stage(self):
+        """产品验收：每阶段范围数量不匹配时，要在启动阶段给出明确配置错误。"""
+        import configparser
+
+        config = configparser.ConfigParser()
+        config["UpliftHistory"] = {
+            "enabled": "true",
+            "mode": "bounded",
+            "stage_times_ma": "10,6,3,0",
+            "stage_multiplier_min": "0.4,0.8",
+            "stage_multiplier_max": "0.9,1.3,1.8",
+            "multiplier_precision": "0.1",
+        }
+
+        with self.assertRaisesRegex(UserConfigError, "数量必须等于阶段数"):
+            _read_uplift_history_config(config, time_total_years=10_000_000.0)
 
     def test_rotated_dem_with_pecube_uses_rotated_georeferenced_mode(self):
         """产品验收：旋转 DEM 可以接 Pecube，但必须标记为旋转后的真实空间参考。"""
