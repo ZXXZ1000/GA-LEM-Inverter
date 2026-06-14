@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 import os
 os.environ['KMP_DUPLICATE_LIB_OK']='TRUE'
 import configparser
+import re
 from pathlib import Path
 from typing import Dict, Any, Optional
 import warnings
@@ -153,9 +154,156 @@ def _config_float_list(config: configparser.ConfigParser, section: str, option: 
     return [float(part.strip()) for part in raw.replace(";", ",").split(",") if part.strip()]
 
 
+_FLOAT_PATTERN = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?"
+_STAGE_BOUND_RE = re.compile(
+    rf"^\s*({_FLOAT_PATTERN})\s*-\s*({_FLOAT_PATTERN})\s*:\s*"
+    rf"({_FLOAT_PATTERN})\s*(?:\.\.|,)\s*({_FLOAT_PATTERN})\s*$"
+)
+
+
+def _stage_label(start_ma: float, end_ma: float) -> str:
+    return f"{start_ma:g}-{end_ma:g} Ma"
+
+
+def _validate_stage_rows(rows: list[tuple[float, float, float, float]], *, source_label: str) -> None:
+    if not rows:
+        raise UserConfigError(f"[UpliftHistory] {source_label} 没有有效阶段配置。")
+
+    tolerance = 1e-9
+    for index, (start_ma, end_ma, low, high) in enumerate(rows, start=1):
+        if start_ma <= end_ma:
+            raise UserConfigError(
+                f"[UpliftHistory] {source_label} 第 {index} 阶段时间必须从过去到现在，"
+                f"即 start_ma > end_ma。当前为 {_stage_label(start_ma, end_ma)}。"
+            )
+        if low <= 0 or high < low:
+            raise UserConfigError(
+                f"[UpliftHistory] {source_label} 第 {index} 阶段必须满足 0 < multiplier_min <= multiplier_max。"
+            )
+    for index in range(len(rows) - 1):
+        previous_end = rows[index][1]
+        next_start = rows[index + 1][0]
+        if abs(previous_end - next_start) > tolerance:
+            raise UserConfigError(
+                f"[UpliftHistory] {source_label} 阶段必须连续。"
+                f"{_stage_label(rows[index][0], rows[index][1])} 后面应该接 {previous_end:g}-... Ma，"
+                f"但下一阶段是 {_stage_label(rows[index + 1][0], rows[index + 1][1])}。"
+            )
+
+
+def _stage_rows_to_config(rows: list[tuple[float, float, float, float]]) -> tuple[list[float], list[float], list[float]]:
+    stage_times = [rows[0][0], *[row[1] for row in rows]]
+    multiplier_min = [row[2] for row in rows]
+    multiplier_max = [row[3] for row in rows]
+    return stage_times, multiplier_min, multiplier_max
+
+
+def _read_stage_sections(config: configparser.ConfigParser) -> tuple[list[float], list[float], list[float]] | None:
+    """Read recommended [UpliftStage1], [UpliftStage2] ... sections."""
+    stage_sections: list[tuple[int, str]] = []
+    for section in config.sections():
+        match = re.fullmatch(r"UpliftStage(\d+)", section, flags=re.IGNORECASE)
+        if match:
+            stage_sections.append((int(match.group(1)), section))
+    if not stage_sections:
+        return None
+
+    stage_sections.sort(key=lambda item: item[0])
+    expected_numbers = list(range(1, len(stage_sections) + 1))
+    actual_numbers = [number for number, _ in stage_sections]
+    if actual_numbers != expected_numbers:
+        raise UserConfigError(
+            "[UpliftHistory] UpliftStage 编号必须从 1 开始连续，"
+            f"例如 [UpliftStage1], [UpliftStage2]。当前编号: {actual_numbers}"
+        )
+
+    rows: list[tuple[float, float, float, float]] = []
+    for _, section in stage_sections:
+        try:
+            start_ma = config.getfloat(section, "start_ma")
+            end_ma = config.getfloat(section, "end_ma")
+            low = config.getfloat(section, "multiplier_min")
+            high = config.getfloat(section, "multiplier_max")
+        except (configparser.Error, ValueError) as exc:
+            raise UserConfigError(
+                f"[{section}] 必须填写数字字段 start_ma, end_ma, multiplier_min, multiplier_max。"
+            ) from exc
+        rows.append((start_ma, end_ma, low, high))
+
+    _validate_stage_rows(rows, source_label="[UpliftStage*]")
+    return _stage_rows_to_config(rows)
+
+
+def _read_named_stage_multiplier_bounds(
+    config: configparser.ConfigParser,
+    *,
+    stage_times: list[float],
+) -> tuple[list[float], list[float]] | None:
+    """Read explicit ``start-end: min..max`` multiplier bounds."""
+    raw = config.get("UpliftHistory", "stage_multiplier_bounds", fallback="").strip()
+    if not raw:
+        return None
+
+    expected = [
+        (round(float(stage_times[i]), 12), round(float(stage_times[i + 1]), 12))
+        for i in range(len(stage_times) - 1)
+    ]
+    bounds_by_stage: dict[tuple[float, float], tuple[float, float]] = {}
+    bad_lines: list[str] = []
+    for line in raw.replace(";", "\n").splitlines():
+        text = line.strip()
+        if not text:
+            continue
+        match = _STAGE_BOUND_RE.match(text)
+        if match is None:
+            bad_lines.append(text)
+            continue
+        start_ma, end_ma, low, high = (float(value) for value in match.groups())
+        key = (round(start_ma, 12), round(end_ma, 12))
+        if key in bounds_by_stage:
+            raise UserConfigError(f"[UpliftHistory] stage_multiplier_bounds 重复配置阶段 {_stage_label(start_ma, end_ma)}。")
+        low = float(low)
+        high = float(high)
+        if low <= 0 or high < low:
+            raise UserConfigError(
+                f"[UpliftHistory] stage_multiplier_bounds 阶段 {_stage_label(start_ma, end_ma)} "
+                "必须满足 0 < min <= max。"
+            )
+        bounds_by_stage[key] = (low, high)
+
+    if bad_lines:
+        example = "150-120: 0.2..0.6"
+        raise UserConfigError(
+            "[UpliftHistory] stage_multiplier_bounds 每行必须写成 '开始Ma-结束Ma: 最小值..最大值'，"
+            f"例如 {example}。无法解析: {bad_lines}"
+        )
+
+    expected_set = set(expected)
+    actual_set = set(bounds_by_stage)
+    missing = [key for key in expected if key not in actual_set]
+    extra = [key for key in bounds_by_stage if key not in expected_set]
+    if missing or extra:
+        missing_text = ", ".join(_stage_label(*key) for key in missing) or "无"
+        extra_text = ", ".join(_stage_label(*key) for key in extra) or "无"
+        expected_text = ", ".join(_stage_label(*key) for key in expected)
+        raise UserConfigError(
+            "[UpliftHistory] stage_multiplier_bounds 必须和 stage_times_ma 定义的阶段完全一致。"
+            f"期望阶段: {expected_text}。缺少: {missing_text}。多余: {extra_text}。"
+        )
+
+    multiplier_min: list[float] = []
+    multiplier_max: list[float] = []
+    for key in expected:
+        low, high = bounds_by_stage[key]
+        multiplier_min.append(low)
+        multiplier_max.append(high)
+    return multiplier_min, multiplier_max
+
+
 def _read_stage_multiplier_bounds(
     config: configparser.ConfigParser,
     *,
+    stage_times: list[float],
     stage_count: int,
     search_mode: str,
 ) -> tuple[float | list[float], float | list[float]]:
@@ -166,6 +314,10 @@ def _read_stage_multiplier_bounds(
         if multiplier_min <= 0 or multiplier_max < multiplier_min:
             raise UserConfigError("[UpliftHistory] multiplier_min/max 必须为正且 min <= max。")
         return multiplier_min, multiplier_max
+
+    named_bounds = _read_named_stage_multiplier_bounds(config, stage_times=stage_times)
+    if named_bounds is not None:
+        return named_bounds
 
     min_raw = config.get(
         "UpliftHistory",
@@ -214,12 +366,18 @@ def _read_uplift_history_config(config: configparser.ConfigParser, *, time_total
         search_mode = mode_raw
     else:
         mode = mode_raw
-        search_mode = explicit_search_mode or "free"
+        search_mode = explicit_search_mode or ("bounded" if _read_stage_sections(config) is not None else "free")
     if mode != "stage_multiplier":
         raise UserConfigError("[UpliftHistory] mode 当前支持 stage_multiplier、free 或 bounded。")
     if search_mode not in {"free", "bounded"}:
         raise UserConfigError("[UpliftHistory] multiplier_search_mode 必须是 free 或 bounded。")
-    stage_times = _config_float_list(config, "UpliftHistory", "stage_times_ma", fallback=f"{time_total_years / 1e6},0")
+    stage_section_bounds = _read_stage_sections(config)
+    if stage_section_bounds is not None and search_mode != "bounded":
+        raise UserConfigError("[UpliftHistory] [UpliftStage*] 只能和 multiplier_search_mode=bounded 一起使用。")
+    if stage_section_bounds is not None:
+        stage_times, multiplier_min, multiplier_max = stage_section_bounds
+    else:
+        stage_times = _config_float_list(config, "UpliftHistory", "stage_times_ma", fallback=f"{time_total_years / 1e6},0")
     try:
         stage_edges = stage_edges_from_ma(stage_times, time_total_years=time_total_years)
     except ValueError as exc:
@@ -230,11 +388,24 @@ def _read_uplift_history_config(config: configparser.ConfigParser, *, time_total
     multiplier_precision = config.getfloat("UpliftHistory", "multiplier_precision", fallback=0.1)
     if multiplier_precision <= 0:
         raise UserConfigError("[UpliftHistory] multiplier_precision 必须大于 0。")
-    multiplier_min, multiplier_max = _read_stage_multiplier_bounds(
+    if stage_section_bounds is None:
+        multiplier_min, multiplier_max = _read_stage_multiplier_bounds(
+            config,
+            stage_times=stage_times,
+            stage_count=stage_count,
+            search_mode=search_mode,
+        )
+    normalize_time_weighted_mean = _config_bool(
         config,
-        stage_count=stage_count,
-        search_mode=search_mode,
+        "UpliftHistory",
+        "normalize_time_weighted_mean",
+        fallback=False,
     )
+    if search_mode == "bounded":
+        # In bounded mode, user-provided stage bounds are hard physical bounds.
+        # Do not rescale multipliers after GA, otherwise configured max values
+        # would no longer be the actual model input.
+        normalize_time_weighted_mean = False
     return {
         "enabled": True,
         "mode": mode,
@@ -245,12 +416,7 @@ def _read_uplift_history_config(config: configparser.ConfigParser, *, time_total
         "multiplier_min": multiplier_min,
         "multiplier_max": multiplier_max,
         "multiplier_precision": multiplier_precision,
-        "normalize_time_weighted_mean": _config_bool(
-            config,
-            "UpliftHistory",
-            "normalize_time_weighted_mean",
-            fallback=True,
-        ),
+        "normalize_time_weighted_mean": normalize_time_weighted_mean,
     }
 
 

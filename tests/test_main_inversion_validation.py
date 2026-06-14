@@ -32,7 +32,7 @@ class MainInversionValidationAcceptanceTests(unittest.TestCase):
             validate_low_resolution_shape((64, 64), 0)
 
     def test_uplift_history_bounded_mode_reads_per_stage_multiplier_ranges(self):
-        """产品验收：bounded 模式允许每个时间阶段配置独立 multiplier 搜索范围。"""
+        """产品验收：bounded 模式用阶段配置块定义每阶段 multiplier 搜索范围。"""
         import configparser
 
         config = configparser.ConfigParser()
@@ -40,10 +40,25 @@ class MainInversionValidationAcceptanceTests(unittest.TestCase):
             "enabled": "true",
             "mode": "stage_multiplier",
             "multiplier_search_mode": "bounded",
-            "stage_times_ma": "10,6,3,0",
-            "stage_multiplier_min": "0.4,0.8,1.1",
-            "stage_multiplier_max": "0.9,1.3,1.8",
             "multiplier_precision": "0.1",
+        }
+        config["UpliftStage1"] = {
+            "start_ma": "10",
+            "end_ma": "6",
+            "multiplier_min": "0.4",
+            "multiplier_max": "0.9",
+        }
+        config["UpliftStage2"] = {
+            "start_ma": "6",
+            "end_ma": "3",
+            "multiplier_min": "0.8",
+            "multiplier_max": "1.3",
+        }
+        config["UpliftStage3"] = {
+            "start_ma": "3",
+            "end_ma": "0",
+            "multiplier_min": "1.1",
+            "multiplier_max": "1.8",
         }
 
         uplift_history = _read_uplift_history_config(config, time_total_years=10_000_000.0)
@@ -52,6 +67,91 @@ class MainInversionValidationAcceptanceTests(unittest.TestCase):
         self.assertEqual(uplift_history["stage_count"], 3)
         self.assertEqual(uplift_history["multiplier_min"], [0.4, 0.8, 1.1])
         self.assertEqual(uplift_history["multiplier_max"], [0.9, 1.3, 1.8])
+        self.assertFalse(uplift_history["normalize_time_weighted_mean"])
+
+    def test_uplift_history_bounded_mode_requires_continuous_stage_sections(self):
+        """产品验收：阶段配置块时间断开时必须直接报错。"""
+        import configparser
+
+        config = configparser.ConfigParser()
+        config["UpliftHistory"] = {
+            "enabled": "true",
+            "mode": "stage_multiplier",
+            "multiplier_search_mode": "bounded",
+            "multiplier_precision": "0.1",
+        }
+        config["UpliftStage1"] = {
+            "start_ma": "10",
+            "end_ma": "6",
+            "multiplier_min": "0.4",
+            "multiplier_max": "0.9",
+        }
+        config["UpliftStage2"] = {
+            "start_ma": "3",
+            "end_ma": "0",
+            "multiplier_min": "1.1",
+            "multiplier_max": "1.8",
+        }
+
+        with self.assertRaisesRegex(UserConfigError, "阶段必须连续"):
+            _read_uplift_history_config(config, time_total_years=10_000_000.0)
+
+    def test_uplift_history_bounded_mode_treats_stage_bounds_as_hard_bounds(self):
+        """产品验收：bounded 模式下每阶段上下界就是实际 multiplier 范围，不能再归一化放大。"""
+        import configparser
+
+        config = configparser.ConfigParser()
+        config["UpliftHistory"] = {
+            "enabled": "true",
+            "mode": "stage_multiplier",
+            "multiplier_search_mode": "bounded",
+            "multiplier_precision": "0.01",
+            "normalize_time_weighted_mean": "true",
+        }
+        config["UpliftStage1"] = {
+            "start_ma": "150",
+            "end_ma": "120",
+            "multiplier_min": "0.2",
+            "multiplier_max": "0.6",
+        }
+        config["UpliftStage2"] = {
+            "start_ma": "120",
+            "end_ma": "0",
+            "multiplier_min": "0.01",
+            "multiplier_max": "0.1",
+        }
+
+        uplift_history = _read_uplift_history_config(config, time_total_years=150_000_000.0)
+
+        self.assertEqual(uplift_history["multiplier_min"], [0.2, 0.01])
+        self.assertEqual(uplift_history["multiplier_max"], [0.6, 0.1])
+        self.assertFalse(uplift_history["normalize_time_weighted_mean"])
+
+    def test_uplift_history_bounded_mode_requires_continuous_stage_numbers(self):
+        """产品验收：阶段块编号必须连续，避免漏掉某一阶段。"""
+        import configparser
+
+        config = configparser.ConfigParser()
+        config["UpliftHistory"] = {
+            "enabled": "true",
+            "mode": "bounded",
+            "multiplier_precision": "0.1",
+        }
+        config["UpliftStage1"] = {
+            "start_ma": "10",
+            "end_ma": "6",
+            "multiplier_min": "0.4",
+            "multiplier_max": "0.9",
+        }
+        config["UpliftStage3"] = {
+            "start_ma": "6",
+            "end_ma": "0",
+            "multiplier_min": "0.8",
+            "multiplier_max": "1.3",
+        }
+
+        with self.assertRaisesRegex(UserConfigError, "编号必须从 1 开始连续"):
+            _read_uplift_history_config(config, time_total_years=10_000_000.0)
 
     def test_uplift_history_bounded_mode_requires_one_bound_per_stage(self):
         """产品验收：每阶段范围数量不匹配时，要在启动阶段给出明确配置错误。"""

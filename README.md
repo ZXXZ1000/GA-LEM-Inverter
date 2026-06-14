@@ -303,7 +303,46 @@ surface_temp = sea_level_temperature - lapse_rate * topography_km
 
 Pecube 的 `uplift0,uplift1...` 已经承接 GA 当前候选解的隆升场，单位 `km/Myr`。由于 `1 mm/yr = 1 km/Myr`，主优化传入的 `0.5..1.5 mm/yr` 可直接作为 Pecube uplift 网格。默认不会再写 Pecube 的 `npoint=-1` 全域速度场；只有显式设置 `include_uniform_velocity_field = true` 时才会叠加 `velocity_km_per_myr`。
 
-时间变化 uplift history 的第一版采用低维阶段倍率，而不是自由 `time,y,x` 三维场。配置示例：
+时间变化 uplift history 采用低维阶段倍率，而不是自由 `time,y,x` 三维场。推荐使用 `bounded` 模式，直接给每个时间阶段设置实际 multiplier 的上下界：
+
+```ini
+[UpliftHistory]
+enabled = true
+mode = stage_multiplier
+multiplier_search_mode = bounded
+multiplier_precision = 0.1
+normalize_time_weighted_mean = false
+
+[UpliftStage1]
+start_ma = 10
+end_ma = 6
+multiplier_min = 0.4
+multiplier_max = 0.9
+
+[UpliftStage2]
+start_ma = 6
+end_ma = 3
+multiplier_min = 0.8
+multiplier_max = 1.3
+
+[UpliftStage3]
+start_ma = 3
+end_ma = 0
+multiplier_min = 1.1
+multiplier_max = 1.8
+```
+
+这表示：
+
+```text
+10-6 Ma: multiplier 搜索 0.4..0.9，实际 uplift = U_base * multiplier
+6-3 Ma : multiplier 搜索 0.8..1.3，实际 uplift = U_base * multiplier
+3-0 Ma : multiplier 搜索 1.1..1.8，实际 uplift = U_base * multiplier
+```
+
+每个 `[UpliftStageN]` 就是一个阶段，`start_ma/end_ma` 直接写阶段时间，`multiplier_min/max` 直接写该阶段的实际 multiplier 范围。阶段块必须从 `[UpliftStage1]` 开始连续编号，时间必须从过去到现在连续排列，最后一个 `end_ma` 必须是 `0`；少写、断开或时间窗和 `[Model] time_total` 不一致，程序会直接报错。`bounded` 模式下这些上下界就是最终进入 FastScape/Pecube 的硬约束，不会再被归一化放大。优化输出会额外保存 `figures/uplift_history_summary.png`、`arrays/stage_uplift.npy`、`arrays/cumulative_stage_uplift.npy` 和 `arrays/stage_multipliers.npy`。
+
+如果只是想让所有阶段共用一个 multiplier 范围，可以使用 `free` 模式：
 
 ```ini
 [UpliftHistory]
@@ -314,34 +353,10 @@ stage_times_ma = 10,6,3,0
 multiplier_min = 0.5
 multiplier_max = 1.5
 multiplier_precision = 0.1
-normalize_time_weighted_mean = true
+normalize_time_weighted_mean = false
 ```
 
-这表示：
-
-```text
-10-6 Ma: U_base * m1
-6-3 Ma : U_base * m2
-3-0 Ma : U_base * m3
-```
-
-`normalize_time_weighted_mean = true` 会把倍率按阶段时长归一化到加权均值为 1，因此 `U_base` 仍代表整个模拟时间窗的平均 uplift，`m_stage` 只表达早晚活动强弱。优化输出会额外保存 `figures/uplift_history_summary.png`、`arrays/stage_uplift.npy`、`arrays/cumulative_stage_uplift.npy` 和 `arrays/stage_multipliers.npy`。
-
-如果已有地质约束能限定某些阶段的活动强弱，可以使用每阶段独立范围，缩小 GA 搜索空间：
-
-```ini
-[UpliftHistory]
-enabled = true
-mode = stage_multiplier
-multiplier_search_mode = bounded
-stage_times_ma = 10,6,3,0
-stage_multiplier_min = 0.4,0.8,1.1
-stage_multiplier_max = 0.9,1.3,1.8
-multiplier_precision = 0.1
-normalize_time_weighted_mean = true
-```
-
-上例会分别约束 `10-6 Ma`、`6-3 Ma`、`3-0 Ma` 三个阶段的倍率范围。`mode = free` 和 `mode = bounded` 也可作为 `stage_multiplier + multiplier_search_mode` 的简写。
+`normalize_time_weighted_mean = true` 是高级选项，仅建议在 `free` 模式下使用。它会按阶段时长重缩放 multiplier，使时间加权平均值等于 1，因此会改变实际上下界。`bounded` 模式会强制按 `false` 处理，保证用户写的每阶段上下界就是实际约束。`mode = free` 和 `mode = bounded` 也可作为 `stage_multiplier + multiplier_search_mode` 的简写。
 
 为了避免优化搜索输出过大，默认 Pecube 配置采用轻量输出：
 
