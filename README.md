@@ -279,6 +279,21 @@ python runner.py --config demo/configs/demo3_staged_medium_smoke.ini
 
 `demo3_staged_smoke.ini` 用于快速验收链路；`demo3_staged_medium_smoke.ini` 用于代码和单元测试完成后的中等长度验收，目标运行时间控制在 2-3 小时。
 
+## 初始地形
+
+FastScape 初始地形在 `[Model]` 里配置：
+
+```ini
+[Model]
+initial_topography = random
+initial_elevation = 0.0
+initial_topography_seed = 42
+```
+
+`initial_topography = random` 是默认值，表示使用 FastScape 的随机白噪声初始地形；`initial_topography_seed` 控制这张随机初始地形，固定 seed 可以复现实验。`initial_topography = flat` 表示全域同一个初始海拔，海拔值由 `initial_elevation` 指定，单位 m；例如 `initial_topography = flat` 且 `initial_elevation = 0.0` 就是从 0 m 平面开始演化。
+
+主流程输出会保存 `figures/experiment_parameters.png`，里面列出本次实际使用的初始地形、seed、时间窗、GA 参数、uplift history 等关键配置；也会保存 `arrays/initial_topography.npy` 供复查。分阶段 uplift history 启用时，`figures/topography_history_summary.png` 会显示初始地形、阶段转折时刻地形和 0 Ma 地形。
+
 ## Pecube 耦合
 
 Pecube 以内置 vendor engine 形式接入。它既可以用 `mode = pecube_coupled` 做独立 smoke 验证，也可以在 `mode = main` 中作为热年代学约束参与 GA 搜索。

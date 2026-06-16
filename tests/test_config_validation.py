@@ -121,6 +121,57 @@ class ConfigValidationAcceptanceTests(unittest.TestCase):
         with self.assertRaisesRegex(UserConfigError, "rainfall_factor.*正数"):
             load_app_config(config_path)
 
+    def test_initial_topography_mode_must_be_explicit_supported_value(self):
+        """产品验收：初始地形模式写错时，启动阶段直接给用户可读错误。"""
+        config_path = self._write_config(
+            """
+            [Run]
+            mode = main
+
+            [Data]
+            terrain_path = ./demo/data/demo1/demo_dem.tif
+            output_path = ./demo/outputs
+
+            [Model]
+            time_total = 2e6
+            initial_topography = zero
+
+            [Optimization]
+            scale_factor = 8
+            """
+        )
+
+        with self.assertRaisesRegex(UserConfigError, "initial_topography.*random.*flat"):
+            load_app_config(config_path)
+
+    def test_flat_initial_topography_config_is_accepted(self):
+        """产品验收：用户可以明确指定 flat 初始地形及海拔。"""
+        config_path = self._write_config(
+            """
+            [Run]
+            mode = main
+
+            [Data]
+            terrain_path = ./demo/data/demo1/demo_dem.tif
+            output_path = ./demo/outputs
+
+            [Model]
+            time_total = 2e6
+            initial_topography = flat
+            initial_elevation = 0.0
+            initial_topography_seed = 7
+
+            [Optimization]
+            scale_factor = 8
+            """
+        )
+
+        app_config = load_app_config(config_path)
+
+        self.assertEqual(app_config.parser.get("Model", "initial_topography"), "flat")
+        self.assertEqual(app_config.parser.getfloat("Model", "initial_elevation"), 0.0)
+        self.assertEqual(app_config.parser.getint("Model", "initial_topography_seed"), 7)
+
 
 if __name__ == "__main__":
     unittest.main()

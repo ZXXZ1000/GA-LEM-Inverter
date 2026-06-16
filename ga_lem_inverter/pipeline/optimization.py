@@ -240,6 +240,44 @@ def _append_default_tail(spatial_vector, lb, ub, n_dim):
     return np.concatenate([spatial_vector, tail])
 
 
+def _stratified_tail_population(count, lb, ub, *, spatial_dim, n_dim):
+    """Generate low-dimensional tail values with explicit coverage of stage trends."""
+    count = int(count)
+    spatial_dim = int(spatial_dim)
+    n_dim = int(n_dim)
+    tail_dim = n_dim - spatial_dim
+    if count <= 0 or tail_dim <= 0:
+        return np.empty((max(0, count), 0), dtype=int)
+
+    lb_array = np.asarray(lb).reshape(-1)
+    ub_array = np.asarray(ub).reshape(-1)
+    if lb_array.size == 1:
+        tail_lb = np.full(tail_dim, int(round(float(lb_array[0]))), dtype=int)
+    else:
+        tail_lb = np.rint(lb_array[spatial_dim:n_dim]).astype(int)
+    if ub_array.size == 1:
+        tail_ub = np.full(tail_dim, int(round(float(ub_array[0]))), dtype=int)
+    else:
+        tail_ub = np.rint(ub_array[spatial_dim:n_dim]).astype(int)
+
+    midpoint = np.rint((tail_lb + tail_ub) / 2).astype(int)
+    if tail_dim == 1:
+        profiles = [midpoint, tail_lb, tail_ub]
+    else:
+        trend = np.linspace(0.0, 1.0, tail_dim)
+        increasing = np.rint(tail_lb + trend * (tail_ub - tail_lb)).astype(int)
+        decreasing = np.rint(tail_lb + trend[::-1] * (tail_ub - tail_lb)).astype(int)
+        profiles = [midpoint, increasing, decreasing, tail_lb, tail_ub]
+
+    tails = np.empty((count, tail_dim), dtype=int)
+    for idx in range(count):
+        if idx < len(profiles):
+            tails[idx] = profiles[idx]
+        else:
+            tails[idx] = np.random.randint(tail_lb, tail_ub + 1)
+    return np.clip(tails, tail_lb, tail_ub).astype(int)
+
+
 def _smooth_random_population(count, n_dim, low_res_shape, lb, ub):
     """生成平滑随机场个体，作为非 DEM prior 的空间结构初始化。"""
     spatial_dim = int(np.prod(low_res_shape))
@@ -432,6 +470,15 @@ class MyGA:
                 size=(random_pop_size, self.n_dim)
             )
             initial_population[smooth_end:, :] = random_individuals
+
+        if self.n_dim > spatial_dim:
+            initial_population[:, spatial_dim:] = _stratified_tail_population(
+                self.size_pop,
+                self.lb,
+                self.ub,
+                spatial_dim=spatial_dim,
+                n_dim=self.n_dim,
+            )
 
         self.Chrom = initial_population
 
@@ -820,6 +867,15 @@ class MyGA:
                 individual = initial_vector + noise
                 individual = np.clip(individual, self.lb, self.ub)
                 new_population[i] = individual
+
+        if self.n_dim > self.spatial_dim and elite_size < self.size_pop:
+            new_population[elite_size:, self.spatial_dim:] = _stratified_tail_population(
+                self.size_pop - elite_size,
+                self.lb,
+                self.ub,
+                spatial_dim=self.spatial_dim,
+                n_dim=self.n_dim,
+            )
 
         # 更新种群
         self.Chrom = new_population

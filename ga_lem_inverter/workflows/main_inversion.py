@@ -9,6 +9,7 @@ import os
 os.environ['KMP_DUPLICATE_LIB_OK']='TRUE'
 import configparser
 import re
+import textwrap
 from pathlib import Path
 from typing import Dict, Any, Optional
 import warnings
@@ -420,6 +421,46 @@ def _read_uplift_history_config(config: configparser.ConfigParser, *, time_total
     }
 
 
+def _read_initial_topography_config(config: configparser.ConfigParser) -> dict[str, Any]:
+    mode = config.get("Model", "initial_topography", fallback="random").strip().lower()
+    if mode not in {"random", "flat"}:
+        raise UserConfigError("[Model] initial_topography 必须是 random 或 flat。")
+    try:
+        elevation = config.getfloat("Model", "initial_elevation", fallback=0.0)
+    except ValueError as exc:
+        raise UserConfigError("[Model] initial_elevation 必须是数字。") from exc
+    if not np.isfinite(elevation):
+        raise UserConfigError("[Model] initial_elevation 不能是 NaN/Inf。")
+    try:
+        seed = config.getint("Model", "initial_topography_seed", fallback=42)
+    except ValueError as exc:
+        raise UserConfigError("[Model] initial_topography_seed 必须是整数。") from exc
+    if seed < 0:
+        raise UserConfigError("[Model] initial_topography_seed 必须是非负整数。")
+    return {
+        "mode": mode,
+        "initial_elevation": float(elevation),
+        "seed": int(seed),
+    }
+
+
+def _initial_topography_dem(initial_topography: dict[str, Any], shape: tuple[int, int]) -> np.ndarray | None:
+    mode = str(initial_topography.get("mode", "random")).strip().lower()
+    if mode == "random":
+        return None
+    if mode == "flat":
+        return np.full(shape, float(initial_topography.get("initial_elevation", 0.0)), dtype=float)
+    raise UserConfigError("[Model] initial_topography 必须是 random 或 flat。")
+
+
+def _initial_topography_preview(initial_topography: dict[str, Any], shape: tuple[int, int]) -> np.ndarray:
+    initial_dem = _initial_topography_dem(initial_topography, shape)
+    if initial_dem is not None:
+        return initial_dem
+    seed = int(initial_topography.get("seed", 42))
+    return np.random.RandomState(seed=seed).rand(int(shape[0]), int(shape[1])).astype(float)
+
+
 def _normalized_stage_multipliers(stage_multipliers: np.ndarray | None, uplift_history: dict[str, Any]) -> np.ndarray | None:
     if not uplift_history.get("enabled"):
         return None
@@ -445,12 +486,24 @@ def _run_candidate_fastscape_series(
     slope_exp,
     rainfall_factor,
     rainfall_model,
+    initial_dem,
+    initial_topography_seed,
     time_total,
     output_steps,
     uplift_history,
     stage_multipliers=None,
+    include_stage_break_times=False,
 ):
-    output_times = fastscape_output_times(time_total, output_steps)
+    required_output_times = (
+        uplift_history.get("stage_edges_years")
+        if include_stage_break_times and uplift_history.get("enabled")
+        else None
+    )
+    output_times = fastscape_output_times(
+        time_total,
+        output_steps,
+        required_output_times=required_output_times,
+    )
     multipliers = _normalized_stage_multipliers(stage_multipliers, uplift_history)
     if multipliers is None:
         topography_series = run_fastscape_series(
@@ -465,8 +518,11 @@ def _run_candidate_fastscape_series(
             slope_exp=slope_exp,
             rainfall_factor=rainfall_factor,
             rainfall_model=rainfall_model,
+            initial_dem=initial_dem,
+            initial_topography_seed=initial_topography_seed,
             time_total=time_total,
             output_steps=output_steps,
+            required_output_times=required_output_times,
         )
         uplift_series = np.repeat(uplift[np.newaxis, :, :], len(topography_series), axis=0)
         return topography_series, uplift_series, None, output_times
@@ -482,8 +538,11 @@ def _run_candidate_fastscape_series(
         slope_exp=slope_exp,
         rainfall_factor=rainfall_factor,
         rainfall_model=rainfall_model,
+        initial_dem=initial_dem,
+        initial_topography_seed=initial_topography_seed,
         time_total=time_total,
         output_steps=output_steps,
+        required_output_times=required_output_times,
         stage_edges_years=uplift_history["stage_edges_years"],
         stage_multipliers=multipliers,
     )
@@ -502,7 +561,7 @@ def _plot_uplift_history_summary(
 ) -> None:
     """Save a compact visual summary of the optimized stage uplift history."""
     n_stage = int(stage_uplift.shape[0])
-    cumulative_stage_uplift_km = cumulative_stage_uplift / 1000.0
+    cumulative_stage_uplift_km = np.asarray(cumulative_stage_uplift, dtype=float)
     fig, axes = plt.subplots(2, n_stage + 1, figsize=(4 * (n_stage + 1), 7), constrained_layout=True)
     if axes.ndim == 1:
         axes = axes.reshape(2, -1)
@@ -567,30 +626,42 @@ def _plot_uplift_history_summary(
     plt.close(fig)
 
 
+def _stage_cumulative_uplift_km(stage_uplift_mm_per_yr: np.ndarray, stage_edges_years: np.ndarray) -> np.ndarray:
+    """Convert stage uplift rates to per-stage cumulative uplift in km."""
+    stage_uplift = np.asarray(stage_uplift_mm_per_yr, dtype=float)
+    durations_ma = np.diff(np.asarray(stage_edges_years, dtype=float).reshape(-1)) / 1e6
+    if stage_uplift.shape[0] != durations_ma.size:
+        raise ValueError("stage_uplift 第一维必须等于阶段数量。")
+    # 1 mm/yr over 1 Ma equals 1 km.
+    return np.asarray([stage_uplift[idx] * durations_ma[idx] for idx in range(durations_ma.size)], dtype=float)
+
+
 def _plot_topography_history_summary(
     *,
     topography_series: np.ndarray,
+    initial_topography: np.ndarray,
     output_path: Path,
     context: RunContext,
     output_times_years: np.ndarray | None = None,
     total_time_years: float | None = None,
+    stage_edges_years: np.ndarray | None = None,
+    stage_multipliers: np.ndarray | None = None,
     display_rotated: bool = False,
-    max_frames: int = 6,
 ) -> None:
-    """Save final-solution FastScape topography snapshots and elevation change."""
+    """Save initial, stage-break, and present-day topography snapshots."""
     series = np.asarray(topography_series, dtype=float)
     if series.ndim != 3 or series.shape[0] < 2:
         logging.warning("跳过地形演化图：topography_series 需要 shape=(time,y,x)，当前 %s", series.shape)
         return
+    initial = np.asarray(initial_topography, dtype=float)
+    if initial.shape != series.shape[1:]:
+        initial = align_model_field(initial, series.shape[1:], label="initial_topography_plot", order=1)
 
-    finite = series[np.isfinite(series)]
+    finite = np.concatenate([initial[np.isfinite(initial)].ravel(), series[np.isfinite(series)].ravel()])
     if finite.size == 0:
-        logging.warning("跳过地形演化图：topography_series 没有有效数值。")
+        logging.warning("跳过地形演化图：没有有效地形数值。")
         return
 
-    n_frames = min(max(2, int(max_frames)), series.shape[0])
-    frame_indices = np.unique(np.linspace(0, series.shape[0] - 1, n_frames, dtype=int))
-    n_frames = len(frame_indices)
     output_times = None
     if output_times_years is not None:
         output_times = np.asarray(output_times_years, dtype=float).reshape(-1)
@@ -602,59 +673,110 @@ def _plot_topography_history_summary(
             )
             output_times = None
 
-    def _frame_label(frame_idx: int) -> str:
-        if output_times is None or total_time_years is None:
-            return "final" if frame_idx == series.shape[0] - 1 else f"frame {frame_idx + 1}"
-        ma_before_present = max(0.0, (float(total_time_years) - float(output_times[frame_idx])) / 1.0e6)
-        if frame_idx == series.shape[0] - 1 or ma_before_present < 1e-9:
-            return "0 Ma"
+    def _ma_label(elapsed_years: float) -> str:
+        if total_time_years is None:
+            return ""
+        ma_before_present = max(0.0, (float(total_time_years) - float(elapsed_years)) / 1.0e6)
         return f"{ma_before_present:g} Ma"
 
-    vmin, vmax = np.nanpercentile(finite, [2, 98])
+    states: list[tuple[str, float, np.ndarray]] = [("Initial\n10 Ma", 0.0, initial)]
+    if output_times is not None and stage_edges_years is not None:
+        stage_edges = np.asarray(stage_edges_years, dtype=float).reshape(-1)
+        for edge in stage_edges[1:-1]:
+            idx = int(np.argmin(np.abs(output_times - float(edge))))
+            elapsed = float(output_times[idx])
+            states.append((f"Stage break\n{_ma_label(elapsed)}", elapsed, series[idx]))
+    present_elapsed = float(output_times[-1]) if output_times is not None else float(total_time_years or series.shape[0] - 1)
+    states.append(("Present day\n0 Ma", present_elapsed, series[-1]))
+
+    vmin = float(np.nanmin(finite))
+    vmax = float(np.nanmax(finite))
     if not np.isfinite(vmin) or not np.isfinite(vmax) or vmin == vmax:
-        vmin = float(np.nanmin(finite))
-        vmax = float(np.nanmax(finite))
+        vmin, vmax = 0.0, 1.0
 
-    delta_series = series - series[0]
-    finite_delta = delta_series[np.isfinite(delta_series)]
-    delta_limit = float(np.nanpercentile(np.abs(finite_delta), 98)) if finite_delta.size else 1.0
-    if not np.isfinite(delta_limit) or delta_limit <= 0:
-        delta_limit = 1.0
+    multipliers = None
+    if stage_multipliers is not None:
+        candidate_multipliers = np.asarray(stage_multipliers, dtype=float).reshape(-1)
+        if candidate_multipliers.size == len(states) - 1:
+            multipliers = candidate_multipliers
 
-    fig, axes = plt.subplots(2, n_frames, figsize=(4 * n_frames, 7), constrained_layout=True)
-    if n_frames == 1:
-        axes = axes.reshape(2, 1)
+    n_states = len(states)
+    fig_width = max(13.0, min(3.7 * n_states + 1.2, 22.0))
+    fig = plt.figure(figsize=(fig_width, 7.2), constrained_layout=True)
+    outer = fig.add_gridspec(2, 1, height_ratios=[1.05, 3.4], hspace=0.12)
 
+    ax_line = fig.add_subplot(outer[0])
+    stage_count = len(states) - 1
+    stage_starts = np.asarray([states[idx][1] for idx in range(stage_count)], dtype=float)
+    stage_ends = np.asarray([states[idx + 1][1] for idx in range(stage_count)], dtype=float)
+    stage_midpoints_ma = (
+        (float(total_time_years) - ((stage_starts + stage_ends) / 2.0)) / 1.0e6
+        if total_time_years is not None
+        else np.arange(stage_count, dtype=float)
+    )
+    stage_range_labels = [
+        f"S{idx + 1}: {_ma_label(states[idx][1])} to {_ma_label(states[idx + 1][1])}"
+        for idx in range(stage_count)
+    ]
+    if multipliers is not None and stage_count:
+        ax_line.plot(
+            stage_midpoints_ma,
+            multipliers,
+            marker="o",
+            markersize=6,
+            linewidth=2.4,
+            color="#2563a7",
+        )
+        ax_line.axhline(1.0, color="#7a7a7a", linestyle="--", linewidth=1)
+        ax_line.set_ylabel("Multiplier")
+        ax_line.set_xticks(stage_midpoints_ma, stage_range_labels)
+        if total_time_years is not None:
+            ax_line.set_xlim(float(total_time_years) / 1.0e6, 0.0)
+            ax_line.set_xlabel("Geologic time before present")
+        y_upper = max(1.2, float(np.nanmax(multipliers)) * 1.2)
+        y_lower = min(0.0, float(np.nanmin(multipliers)) * 0.8)
+        ax_line.set_ylim(y_lower, y_upper)
+        for x, multiplier in zip(stage_midpoints_ma, multipliers):
+            ax_line.text(
+                x,
+                multiplier,
+                f"{multiplier:.3g}",
+                ha="center",
+                va="bottom",
+                fontsize=10,
+                color="#1f1f1f",
+            )
+    else:
+        ax_line.text(0.5, 0.5, "Stage multipliers not available", ha="center", va="center")
+        ax_line.set_axis_off()
+    ax_line.set_title("Optimized uplift stage multipliers", fontsize=13, weight="bold", pad=6)
+    ax_line.grid(axis="y", alpha=0.22)
+    ax_line.spines["top"].set_visible(False)
+    ax_line.spines["right"].set_visible(False)
+
+    state_grid = outer[1].subgridspec(1, n_states, wspace=0.04)
+    state_axes = [fig.add_subplot(state_grid[0, idx]) for idx in range(n_states)]
     terrain_im = None
-    delta_im = None
-    for col_idx, frame_idx in enumerate(frame_indices):
-        label = _frame_label(frame_idx)
-        terrain_im = axes[0, col_idx].imshow(
-            oriented_display_array(series[frame_idx], rotated=display_rotated),
+    for idx, (ax, (label, _, terrain)) in enumerate(zip(state_axes, states)):
+        terrain_im = ax.imshow(
+            oriented_display_array(terrain, rotated=display_rotated),
             cmap="terrain",
             origin="upper",
             vmin=vmin,
             vmax=vmax,
         )
-        axes[0, col_idx].set_title(f"{label}\nelevation")
-        axes[0, col_idx].set_axis_off()
-
-        delta_im = axes[1, col_idx].imshow(
-            oriented_display_array(delta_series[frame_idx], rotated=display_rotated),
-            cmap="RdBu_r",
-            origin="upper",
-            vmin=-delta_limit,
-            vmax=delta_limit,
-        )
-        axes[1, col_idx].set_title(f"{label}\nchange from first")
-        axes[1, col_idx].set_axis_off()
+        ax.set_title(label, fontsize=10.5, pad=7)
+        ax.set_axis_off()
 
     if terrain_im is not None:
-        fig.colorbar(terrain_im, ax=axes[0, :].ravel().tolist(), shrink=0.8, label="Elevation (m)")
-    if delta_im is not None:
-        fig.colorbar(delta_im, ax=axes[1, :].ravel().tolist(), shrink=0.8, label="Elevation change (m)")
+        cbar = fig.colorbar(terrain_im, ax=state_axes, shrink=0.86, pad=0.018)
+        cbar.set_label(f"Elevation (m), shared scale {vmin:.0f}-{vmax:.0f}")
 
-    fig.suptitle("FastScape topography evolution for best solution", fontsize=14)
+    fig.suptitle(
+        "Uplift history and key topography states",
+        fontsize=14,
+        weight="bold",
+    )
     fig.savefig(output_path, dpi=200)
     context.add_artifact(output_path)
     plt.close(fig)
@@ -698,6 +820,73 @@ def _plot_fastscape_forcing_summary(
 
     fig.suptitle("FastScape forcing inputs", fontsize=14)
     fig.savefig(output_path, dpi=200)
+    context.add_artifact(output_path)
+    plt.close(fig)
+
+
+def _format_parameter_value(value: Any) -> str:
+    if isinstance(value, float):
+        return f"{value:.6g}"
+    if isinstance(value, (np.floating,)):
+        return f"{float(value):.6g}"
+    if isinstance(value, (np.integer,)):
+        return str(int(value))
+    if isinstance(value, (list, tuple, np.ndarray)):
+        array = np.asarray(value)
+        if array.ndim == 1 and array.size <= 8:
+            return ", ".join(_format_parameter_value(item) for item in array.tolist())
+        return str(list(value))
+    text = str(value)
+    if len(text) > 90:
+        text = textwrap.fill(text, width=70, break_long_words=False, break_on_hyphens=False)
+    return text
+
+
+def _display_path(path: str | Path, *, base_dir: Path | None = None) -> str:
+    value = Path(path)
+    if base_dir is not None:
+        try:
+            return str(value.resolve().relative_to(base_dir.resolve()))
+        except Exception:
+            pass
+    return str(value)
+
+
+def _plot_experiment_parameters_summary(
+    *,
+    parameters: dict[str, Any],
+    output_path: Path,
+    context: RunContext,
+) -> None:
+    """Save a readable one-page table of the effective experiment settings."""
+    rows = [(str(key), _format_parameter_value(value)) for key, value in parameters.items()]
+    row_count = max(1, len(rows))
+    fig_height = max(5.0, 0.32 * row_count + 1.3)
+    fig, ax = plt.subplots(figsize=(12, fig_height), constrained_layout=True)
+    ax.set_axis_off()
+    table = ax.table(
+        cellText=rows,
+        colLabels=["Parameter", "Effective value"],
+        cellLoc="left",
+        colLoc="left",
+        loc="center",
+        colWidths=[0.42, 0.58],
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(9)
+    table.scale(1.0, 1.25)
+    for (row, col), cell in table.get_celld().items():
+        cell.set_edgecolor("#d9d9d9")
+        if row == 0:
+            cell.set_facecolor("#e9eef5")
+            cell.set_text_props(weight="bold")
+        elif row % 2 == 0:
+            cell.set_facecolor("#f7f7f7")
+        else:
+            cell.set_facecolor("#ffffff")
+        cell.get_text().set_wrap(True)
+    ax.set_title("Experiment parameter summary", fontsize=14, weight="bold", pad=14)
+    fig.savefig(output_path, dpi=220)
     context.add_artifact(output_path)
     plt.close(fig)
 
@@ -1033,6 +1222,8 @@ def create_objective_function(resampled_dem, LOW_RES_SHAPE, ORIGINAL_SHAPE,
                            rainfall_factor=1.0,
                            rainfall_model=None,
                            pecube_evaluator=None, pecube_time_steps=2,
+                           initial_dem=None,
+                           initial_topography_seed=42,
                            uplift_history=None):
     """创建优化目标函数"""
     def objective_function(uplift_vector):
@@ -1061,6 +1252,8 @@ def create_objective_function(resampled_dem, LOW_RES_SHAPE, ORIGINAL_SHAPE,
                     slope_exp=slope_exp,
                     rainfall_factor=rainfall_factor,
                     rainfall_model=rainfall_model,
+                    initial_dem=initial_dem,
+                    initial_topography_seed=initial_topography_seed,
                     time_total=total_simulation_time,
                     output_steps=max(2, pecube_time_steps if pecube_evaluator is not None and pecube_evaluator.enabled else 2),
                     uplift_history=uplift_history or {"enabled": False},
@@ -1080,6 +1273,8 @@ def create_objective_function(resampled_dem, LOW_RES_SHAPE, ORIGINAL_SHAPE,
                     slope_exp=slope_exp,
                     rainfall_factor=rainfall_factor,
                     rainfall_model=rainfall_model,
+                    initial_dem=initial_dem,
+                    initial_topography_seed=initial_topography_seed,
                     time_total=total_simulation_time
                 )
 
@@ -1675,6 +1870,15 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
         time_step_num = 101  # 可以添加到config文件中
         total_simulation_time = config.getfloat('Model', 'time_total')
         uplift_history = _read_uplift_history_config(config, time_total_years=total_simulation_time)
+        initial_topography = _read_initial_topography_config(config)
+        initial_dem = _initial_topography_dem(initial_topography, ORIGINAL_SHAPE)
+        initial_topography_for_plot = _initial_topography_preview(initial_topography, ORIGINAL_SHAPE)
+        logging.info(
+            "初始地形配置: mode=%s, flat_elevation=%s, random_seed=%s",
+            initial_topography["mode"],
+            initial_topography["initial_elevation"],
+            initial_topography["seed"],
+        )
         terrain_resolution = spacing # 可以添加到config文件中
         feature_smooth_radius = 2  # 可以添加到config文件中
         use_lpips = config.getboolean('Fitness', 'use_lpips', fallback=True)
@@ -1728,6 +1932,9 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
             'rainfall_model': rainfall_from_config(config, base_dir=context.config_path.parent),
             'time_total': config.getfloat('Model', 'time_total'),
             'spacing': spacing,
+            'initial_topography_mode': initial_topography["mode"],
+            'initial_elevation': initial_topography["initial_elevation"],
+            'initial_topography_seed': initial_topography["seed"],
             'display_rotated': display_rotated,
         }
 
@@ -1797,6 +2004,8 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
             slope_exp=model_params["slope_exp"],
             rainfall_factor=model_params["rainfall_factor"],
             rainfall_model=model_params["rainfall_model"],
+            initial_dem=initial_dem,
+            initial_topography_seed=initial_topography["seed"],
             use_lpips=use_lpips,
             pecube_evaluator=pecube_evaluator,
             pecube_time_steps=pecube_time_steps,
@@ -2029,6 +2238,8 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
 
             # 生成最终地形
             final_output_times_years = None
+            plot_topography_series = None
+            plot_topography_output_times_years = None
             if uplift_history.get("enabled"):
                 final_series_for_output, best_uplift_series, best_stage_multipliers, final_output_times_years = _run_candidate_fastscape_series(
                     k_sp=rotated_Ksp,
@@ -2042,12 +2253,34 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
                     slope_exp=config.getfloat('Model', 'slope_exp'),
                     rainfall_factor=model_params['rainfall_factor'],
                     rainfall_model=model_params['rainfall_model'],
+                    initial_dem=initial_dem,
+                    initial_topography_seed=initial_topography["seed"],
                     time_total=total_simulation_time,
                     output_steps=max(2, pecube_time_steps),
                     uplift_history=uplift_history,
                     stage_multipliers=best_stage_multipliers,
                 )
                 final_elevation = final_series_for_output[-1]
+                plot_topography_series, _, _, plot_topography_output_times_years = _run_candidate_fastscape_series(
+                    k_sp=rotated_Ksp,
+                    uplift=best_full_res_uplift,
+                    k_diff=D_DIFF,
+                    x_size=col,
+                    y_size=row,
+                    spacing=spacing,
+                    boundary_status=model_params['boundary_status'],
+                    area_exp=config.getfloat('Model', 'area_exp'),
+                    slope_exp=config.getfloat('Model', 'slope_exp'),
+                    rainfall_factor=model_params['rainfall_factor'],
+                    rainfall_model=model_params['rainfall_model'],
+                    initial_dem=initial_dem,
+                    initial_topography_seed=initial_topography["seed"],
+                    time_total=total_simulation_time,
+                    output_steps=max(2, pecube_time_steps),
+                    uplift_history=uplift_history,
+                    stage_multipliers=best_stage_multipliers,
+                    include_stage_break_times=True,
+                )
             else:
                 best_uplift_series = None
                 final_series_for_output = None
@@ -2063,16 +2296,21 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
                     slope_exp=config.getfloat('Model', 'slope_exp'),
                     rainfall_factor=model_params['rainfall_factor'],
                     rainfall_model=model_params['rainfall_model'],
+                    initial_dem=initial_dem,
+                    initial_topography_seed=initial_topography["seed"],
                     time_total=total_simulation_time
                 )
             final_elevation_cropped = crop_output_border(final_elevation, safe_border)
             target_dem_cropped = crop_output_border(resampled_dem, safe_border)
             best_full_res_uplift_cropped = crop_output_border(best_full_res_uplift, safe_border)
             topography_series_cropped = None
-            if final_series_for_output is not None:
+            if plot_topography_series is None:
+                plot_topography_series = final_series_for_output
+                plot_topography_output_times_years = final_output_times_years
+            if plot_topography_series is not None:
                 topography_series_cropped = np.asarray([
                     crop_output_border(frame, safe_border)
-                    for frame in final_series_for_output
+                    for frame in plot_topography_series
                 ])
             display_final_elevation = oriented_display_array(final_elevation_cropped, rotated=display_rotated)
             display_target_dem = oriented_display_array(target_dem_cropped, rotated=display_rotated)
@@ -2134,7 +2372,7 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
                     demo_metrics[f"uplift_history_duration_ma_{idx}"] = float(duration)
                 if final_output_times_years is not None:
                     for idx, time_years in enumerate(final_output_times_years, start=1):
-                        demo_metrics[f"topography_output_time_ma_before_present_{idx}"] = float(
+                        demo_metrics[f"pecube_topography_output_time_ma_before_present_{idx}"] = float(
                             max(0.0, (total_simulation_time - time_years) / 1e6)
                         )
             else:
@@ -2167,6 +2405,8 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
                         slope_exp=config.getfloat('Model', 'slope_exp'),
                         rainfall_factor=model_params['rainfall_factor'],
                         rainfall_model=model_params['rainfall_model'],
+                        initial_dem=initial_dem,
+                        initial_topography_seed=initial_topography["seed"],
                         time_total=total_simulation_time,
                         output_steps=max(2, pecube_time_steps),
                         uplift_history=uplift_history,
@@ -2250,11 +2490,10 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
                     best_full_res_uplift_cropped * multiplier
                     for multiplier in best_stage_multipliers
                 ])
-                durations_ma = np.diff(uplift_history["stage_edges_years"]) / 1e6
-                cumulative_stage_uplift_cropped = np.asarray([
-                    stage_uplift_cropped[idx] * durations_ma[idx]
-                    for idx in range(len(durations_ma))
-                ])
+                cumulative_stage_uplift_cropped = _stage_cumulative_uplift_km(
+                    stage_uplift_cropped,
+                    uplift_history["stage_edges_years"],
+                )
                 _plot_uplift_history_summary(
                     stage_uplift=stage_uplift_cropped,
                     cumulative_stage_uplift=cumulative_stage_uplift_cropped,
@@ -2265,10 +2504,14 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
                     display_rotated=display_rotated,
                 )
             if topography_series_cropped is not None:
+                initial_topography_cropped = crop_output_border(initial_topography_for_plot, safe_border)
                 _plot_topography_history_summary(
                     topography_series=topography_series_cropped,
-                    output_times_years=final_output_times_years,
+                    initial_topography=initial_topography_cropped,
+                    output_times_years=plot_topography_output_times_years,
                     total_time_years=total_simulation_time,
+                    stage_edges_years=uplift_history.get("stage_edges_years") if uplift_history.get("enabled") else None,
+                    stage_multipliers=best_stage_multipliers,
                     output_path=context.figure_path("topography_history_summary.png"),
                     context=context,
                     display_rotated=display_rotated,
@@ -2297,7 +2540,9 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
                     'cumulative_stage_uplift': cumulative_stage_uplift_cropped,
                     'stage_multipliers': best_stage_multipliers,
                     'topography_series': topography_series_cropped,
-                    'topography_output_times_years': final_output_times_years,
+                    'topography_output_times_years': plot_topography_output_times_years,
+                    'pecube_topography_output_times_years': final_output_times_years,
+                    'initial_topography': crop_output_border(initial_topography_for_plot, safe_border),
                     'fitness_history': np.array(fitness_history) if fitness_history is not None else None
                 }
             save_optimization_results(arrays_dir, results, context)
@@ -2314,6 +2559,52 @@ def run_main_workflow(config: configparser.ConfigParser, context: RunContext) ->
                 f.write(f"Best Fitness: {best_fitness}\n")
                 f.write(f"Optimization Time: {end_time - start_time:.2f} seconds\n")
             context.add_artifact(config_file)
+
+            parameter_summary = {
+                "run_mode": context.mode,
+                "preset": config.get("Run", "preset", fallback=""),
+                "terrain_path": _display_path(config.get("Data", "terrain_path", fallback=""), base_dir=Path.cwd()),
+                "output_dir": _display_path(context.root, base_dir=Path.cwd()),
+                "initial_topography": initial_topography["mode"],
+                "initial_elevation_m": initial_topography["initial_elevation"],
+                "initial_topography_seed": initial_topography["seed"],
+                "time_total_ma": total_simulation_time / 1e6,
+                "model_shape": f"{row} x {col}",
+                "spacing_m": spacing,
+                "boundary_status": model_params["boundary_status"],
+                "k_sp_value": config.getfloat("Model", "k_sp_value"),
+                "ksp_fault": config.getfloat("Model", "ksp_fault"),
+                "d_diff_value": D_DIFF,
+                "area_exp": model_params["area_exp"],
+                "slope_exp": model_params["slope_exp"],
+                "rainfall_factor": model_params["rainfall_factor"],
+                "rainfall_mode": config.get("Rainfall", "mode", fallback="uniform"),
+                "scale_factor": scale_factor,
+                "low_res_shape": f"{LOW_RES_SHAPE[0]} x {LOW_RES_SHAPE[1]}",
+                "uplift_min_mm_per_yr": ga_params["lb"],
+                "uplift_max_mm_per_yr": ga_params["ub"],
+                "uplift_precision_mm_per_yr": ga_params["uplift_precision"],
+                "search_strategy": ga_params["search_strategy"],
+                "population_size": ga_params["pop"],
+                "max_iterations": ga_params["max_iter"],
+                "n_jobs": config.get("Optimization", "n_jobs", fallback=""),
+                "ga_random_seed": ga_params["random_seed"],
+                "uplift_history_enabled": bool(uplift_history.get("enabled")),
+                "uplift_history_mode": uplift_history.get("mode", "off"),
+                "multiplier_search_mode": uplift_history.get("multiplier_search_mode", "off"),
+                "stage_times_ma": uplift_history.get("stage_times_ma", ""),
+                "stage_multipliers": best_stage_multipliers.tolist() if best_stage_multipliers is not None else "",
+                "best_fitness": float(best_fitness),
+                "optimization_time_seconds": float(end_time - start_time),
+            }
+            parameter_summary_path = context.metrics_dir / "parameter_summary.json"
+            write_metrics(context, "parameter_summary.json", parameter_summary)
+            context.add_artifact(parameter_summary_path)
+            _plot_experiment_parameters_summary(
+                parameters=parameter_summary,
+                output_path=context.figure_path("experiment_parameters.png"),
+                context=context,
+            )
 
             logging.info(f"所有结果已保存到: {output_path}")
             logging.info("优化过程成功完成")

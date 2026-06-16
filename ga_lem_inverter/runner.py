@@ -147,6 +147,12 @@ def _print_diagnostics(app_config: AppConfig, context: RunContext) -> None:
         f"population={config.get('Optimization', 'population_size', fallback=config.get('GeneticAlgorithm', 'ga_pop_size', fallback=''))}, "
         f"max_iter={config.get('Optimization', 'max_iterations', fallback=config.get('GeneticAlgorithm', 'ga_max_iter', fallback=''))}"
     )
+    print(
+        "初始地形: "
+        f"{config.get('Model', 'initial_topography', fallback='random')} "
+        f"(flat_elevation={config.get('Model', 'initial_elevation', fallback='0.0')} m, "
+        f"seed={config.get('Model', 'initial_topography_seed', fallback='42')})"
+    )
     print(f"n_jobs: {config.get('Optimization', 'n_jobs', fallback=config.get('GeneticAlgorithm', 'n_jobs', fallback='1'))}")
     print(f"预设: {config.get('Run', 'preset', fallback='demo')}")
     print("=" * 42)

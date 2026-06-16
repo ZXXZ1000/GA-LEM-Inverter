@@ -9,6 +9,10 @@ from ga_lem_inverter.config import UserConfigError
 from ga_lem_inverter.workflows.main_inversion import (
     create_objective_function,
     _read_uplift_history_config,
+    _read_initial_topography_config,
+    _initial_topography_dem,
+    _run_candidate_fastscape_series,
+    _stage_cumulative_uplift_km,
     _reproject_rotated_dem,
     create_model_grid_erosion_field,
     validate_low_resolution_shape,
@@ -170,6 +174,114 @@ class MainInversionValidationAcceptanceTests(unittest.TestCase):
         with self.assertRaisesRegex(UserConfigError, "数量必须等于阶段数"):
             _read_uplift_history_config(config, time_total_years=10_000_000.0)
 
+    def test_flat_initial_topography_config_builds_constant_initial_dem(self):
+        """产品验收：flat 初始地形就是用户指定海拔的常数 DEM。"""
+        import configparser
+
+        config = configparser.ConfigParser()
+        config["Model"] = {
+            "initial_topography": "flat",
+            "initial_elevation": "25.5",
+            "initial_topography_seed": "11",
+        }
+
+        initial = _read_initial_topography_config(config)
+        initial_dem = _initial_topography_dem(initial, (3, 4))
+
+        self.assertEqual(initial["mode"], "flat")
+        self.assertEqual(initial["seed"], 11)
+        self.assertEqual(initial_dem.shape, (3, 4))
+        self.assertTrue(np.allclose(initial_dem, 25.5))
+
+    def test_stage_cumulative_uplift_uses_km_per_myr_equivalence(self):
+        """产品验收：1 mm/yr 持续 1 Ma 应累计 1 km，不能再除以 1000。"""
+        stage_uplift = np.asarray([
+            np.full((2, 2), 0.4, dtype=float),
+            np.full((2, 2), 0.05, dtype=float),
+        ])
+        cumulative = _stage_cumulative_uplift_km(stage_uplift, np.array([0.0, 1e6, 2e6]))
+
+        self.assertTrue(np.allclose(cumulative[0], 0.4))
+        self.assertTrue(np.allclose(cumulative[1], 0.05))
+
+    def test_candidate_series_only_adds_stage_break_times_when_requested(self):
+        """产品验收：阶段转折帧只服务最终地形图，不能偷偷改变 GA/Pecube 时间采样。"""
+        topographies = np.zeros((2, 2, 2), dtype=float)
+
+        with mock.patch(
+            "ga_lem_inverter.workflows.main_inversion.run_fastscape_time_scaled_series",
+            return_value=SimpleNamespace(
+                topography_series=topographies,
+                uplift_series=topographies,
+                output_times=np.array([100.0, 1000.0]),
+            ),
+        ) as runner_mock:
+            _run_candidate_fastscape_series(
+                k_sp=np.ones((2, 2), dtype=float),
+                uplift=np.ones((2, 2), dtype=float),
+                k_diff=0.1,
+                x_size=2,
+                y_size=2,
+                spacing=100.0,
+                boundary_status="fixed_value",
+                area_exp=0.42,
+                slope_exp=1.0,
+                rainfall_factor=1.0,
+                rainfall_model=None,
+                initial_dem=None,
+                initial_topography_seed=42,
+                time_total=1000.0,
+                output_steps=2,
+                uplift_history={
+                    "enabled": True,
+                    "stage_edges_years": np.array([0.0, 500.0, 1000.0]),
+                    "stage_count": 2,
+                    "normalize_time_weighted_mean": False,
+                },
+                stage_multipliers=np.array([1.0, 1.0]),
+            )
+            self.assertIsNone(runner_mock.call_args.kwargs["required_output_times"])
+
+            _run_candidate_fastscape_series(
+                k_sp=np.ones((2, 2), dtype=float),
+                uplift=np.ones((2, 2), dtype=float),
+                k_diff=0.1,
+                x_size=2,
+                y_size=2,
+                spacing=100.0,
+                boundary_status="fixed_value",
+                area_exp=0.42,
+                slope_exp=1.0,
+                rainfall_factor=1.0,
+                rainfall_model=None,
+                initial_dem=None,
+                initial_topography_seed=42,
+                time_total=1000.0,
+                output_steps=2,
+                uplift_history={
+                    "enabled": True,
+                    "stage_edges_years": np.array([0.0, 500.0, 1000.0]),
+                    "stage_count": 2,
+                    "normalize_time_weighted_mean": False,
+                },
+                stage_multipliers=np.array([1.0, 1.0]),
+                include_stage_break_times=True,
+            )
+            self.assertTrue(np.array_equal(runner_mock.call_args.kwargs["required_output_times"], np.array([0.0, 500.0, 1000.0])))
+
+    def test_parameter_names_distinguish_pecube_and_visualization_timesteps(self):
+        """产品验收：带阶段转折的可视化时间不能和 Pecube 评价时间混淆。"""
+        demo_metrics = {}
+        final_output_times_years = np.array([100.0, 500.0, 1000.0])
+        total_simulation_time = 1000.0
+        for idx, time_years in enumerate(final_output_times_years, start=1):
+            demo_metrics[f"pecube_topography_output_time_ma_before_present_{idx}"] = float(
+                max(0.0, (total_simulation_time - time_years) / 1e6)
+            )
+
+        self.assertIn("pecube_topography_output_time_ma_before_present_1", demo_metrics)
+        self.assertNotIn("topography_output_time_ma_before_present_1", demo_metrics)
+
     def test_rotated_dem_with_pecube_uses_rotated_georeferenced_mode(self):
         """产品验收：旋转 DEM 可以接 Pecube，但必须标记为旋转后的真实空间参考。"""
         metrics = validate_rotation_spatial_constraints(
@@ -287,6 +399,8 @@ class MainInversionValidationAcceptanceTests(unittest.TestCase):
                 feature_smooth_radius=1,
                 pecube_evaluator=evaluator,
                 pecube_time_steps=3,
+                initial_dem=np.full((2, 2), 2.0, dtype=float),
+                initial_topography_seed=77,
             )
             loss = objective(np.array([0.5]))
 
@@ -298,6 +412,8 @@ class MainInversionValidationAcceptanceTests(unittest.TestCase):
         self.assertTrue(np.array_equal(evaluator.call["topography_series"], series))
         self.assertEqual(evaluator.call["uplift_series"].shape, series.shape)
         self.assertNotIn("temperature_series", evaluator.call)
+        self.assertTrue(np.array_equal(series_mock.call_args.kwargs["initial_dem"], np.full((2, 2), 2.0)))
+        self.assertEqual(series_mock.call_args.kwargs["initial_topography_seed"], 77)
 
     def test_pecube_objective_passes_stage_specific_uplift_series_to_thermo_constraint(self):
         """产品验收：启用 uplift history 后，Pecube 收到的 uplift_series 不能是同一场重复。"""
@@ -389,6 +505,8 @@ class MainInversionValidationAcceptanceTests(unittest.TestCase):
                 area_exp=0.42,
                 slope_exp=1.3,
                 rainfall_factor=1.7,
+                initial_dem=np.full((2, 2), 3.0, dtype=float),
+                initial_topography_seed=123,
             )
             objective(np.array([0.5]))
 
@@ -396,6 +514,8 @@ class MainInversionValidationAcceptanceTests(unittest.TestCase):
         self.assertEqual(model_mock.call_args.kwargs["area_exp"], 0.42)
         self.assertEqual(model_mock.call_args.kwargs["slope_exp"], 1.3)
         self.assertEqual(model_mock.call_args.kwargs["rainfall_factor"], 1.7)
+        self.assertTrue(np.array_equal(model_mock.call_args.kwargs["initial_dem"], np.full((2, 2), 3.0)))
+        self.assertEqual(model_mock.call_args.kwargs["initial_topography_seed"], 123)
 
 
 if __name__ == "__main__":

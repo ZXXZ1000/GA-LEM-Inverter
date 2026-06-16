@@ -113,6 +113,47 @@ class ForwardModelAcceptanceTests(unittest.TestCase):
         self.assertEqual(input_vars["drainage__runoff"], 2.0)
         self.assertTrue(np.array_equal(input_vars["spl__k_coef"], ksp))
 
+    def test_fastscape_series_can_use_explicit_initial_dem_instead_of_random_seed(self):
+        """产品验收：flat/显式初始地形必须真正进入 FastScape，而不是仍然用随机 seed。"""
+        shape = (5, 5)
+        initial_dem = np.full(shape, 12.0, dtype=float)
+        captured = {}
+
+        class DummyXsimlab:
+            def run(self, *, model):
+                class DummyElevation:
+                    values = np.zeros((3, *shape), dtype=float)
+
+                class DummyDataset:
+                    topography__elevation = DummyElevation()
+
+                return DummyDataset()
+
+        class DummySetup:
+            xsimlab = DummyXsimlab()
+
+        def fake_create_setup(**kwargs):
+            captured.update(kwargs)
+            return DummySetup()
+
+        with patch("ga_lem_inverter.pipeline.forward_model.xs.create_setup", side_effect=fake_create_setup):
+            run_fastscape_series(
+                k_sp=np.ones(shape, dtype=float) * 1.0e-6,
+                uplift=np.ones(shape, dtype=float) * 0.1,
+                k_diff=0.1,
+                x_size=shape[1],
+                y_size=shape[0],
+                spacing=1000.0,
+                time_total=1000.0,
+                output_steps=3,
+                initial_dem=initial_dem,
+                initial_topography_seed=99,
+            )
+
+        input_vars = captured["input_vars"]
+        self.assertTrue(np.array_equal(input_vars["init_topography__initial_elevation"], initial_dem))
+        self.assertNotIn("init_topography__seed", input_vars)
+
     def test_python_rainfall_model_runs_inside_fastscape(self):
         """产品验收：用户 Python 降雨函数应在 FastScape step 内生成 runoff 场。"""
         shape = (5, 5)
@@ -151,6 +192,13 @@ class ForwardModelAcceptanceTests(unittest.TestCase):
         ma_before_present = (10.0e6 - times) / 1.0e6
         self.assertAlmostEqual(float(ma_before_present[-1]), 0.0)
         self.assertGreater(float(ma_before_present[0]), 0.0)
+
+    def test_fastscape_output_times_can_include_stage_breaks(self):
+        """产品验收：地形历史图需要真实阶段转折时刻，而不是抽样近似帧。"""
+        times = fastscape_output_times(2.0e6, 2, required_output_times=[1.0e6])
+
+        self.assertTrue(np.any(np.isclose(times, 1.0e6)))
+        self.assertAlmostEqual(float(times[-1]), 2.0e6)
 
     def test_stage_times_convert_from_geologic_ma_to_elapsed_fastscape_years(self):
         """产品验收：10,6,3,0 Ma 必须转换成 FastScape 从 0 开始的连续时间边界。"""

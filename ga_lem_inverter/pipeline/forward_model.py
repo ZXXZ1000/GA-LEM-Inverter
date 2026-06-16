@@ -293,18 +293,37 @@ def align_fastscape_inputs(k_sp, uplift, *, x_size, y_size):
     return k_sp_aligned, uplift_aligned
 
 
-def _fastscape_times(time_total, output_steps):
+def _required_output_times(required_output_times, *, time_total):
+    if required_output_times is None:
+        return np.asarray([], dtype=float)
+    times = np.asarray(required_output_times, dtype=float).reshape(-1)
+    if times.size == 0:
+        return np.asarray([], dtype=float)
+    if not np.all(np.isfinite(times)):
+        raise ValueError("required_output_times 不能包含 NaN/Inf。")
+    time_total = float(time_total)
+    tolerance = max(1e-9, abs(time_total) * 1e-12)
+    valid = times[(times > tolerance) & (times <= time_total + tolerance)]
+    if valid.size == 0:
+        return np.asarray([], dtype=float)
+    valid = np.clip(valid, 0.0, time_total)
+    return np.unique(np.round(valid, decimals=9)).astype(float)
+
+
+def _fastscape_times(time_total, output_steps, required_output_times=None):
     output_steps = max(2, int(output_steps))
-    master_times = np.linspace(0, time_total, 101)
+    time_total = float(time_total)
+    required_times = _required_output_times(required_output_times, time_total=time_total)
+    master_times = np.unique(np.concatenate([np.linspace(0, time_total, 101), required_times]))
     output_steps = min(output_steps, len(master_times) - 1)
     output_indices = np.linspace(1, len(master_times) - 1, output_steps, dtype=int)
-    out_times = master_times[output_indices]
+    out_times = np.unique(np.concatenate([master_times[output_indices], required_times]))
     return master_times, out_times
 
 
-def fastscape_output_times(time_total, output_steps):
+def fastscape_output_times(time_total, output_steps, required_output_times=None):
     """Return elapsed FastScape output times in years for plot labels and QA."""
-    return _fastscape_times(time_total, output_steps)[1]
+    return _fastscape_times(time_total, output_steps, required_output_times=required_output_times)[1]
 
 
 def validate_rainfall_factor(rainfall_factor):
@@ -333,6 +352,15 @@ def _model_and_rainfall_input(rainfall, *, time_total):
     return basic_model.update_processes({"drainage": FlowAccumulator}), {"drainage__runoff": value}
 
 
+def _apply_initial_topography(model, input_vars, initial_dem, *, y_size, x_size, initial_topography_seed):
+    if initial_dem is None:
+        input_vars['init_topography__seed'] = initial_topography_seed
+        return model
+    initial = align_model_field(initial_dem, (int(y_size), int(x_size)), label="initial_dem", order=1)
+    input_vars['init_topography__initial_elevation'] = initial
+    return model.update_processes({"init_topography": InitialDEM})
+
+
 def run_fastscape_series(
     k_sp,
     uplift,
@@ -346,8 +374,10 @@ def run_fastscape_series(
     time_total=10e6,
     rainfall_factor=1.0,
     rainfall_model=None,
+    initial_dem=None,
     initial_topography_seed=42,
     output_steps=21,
+    required_output_times=None,
 ):
     """
     运行 FastScape 模型并返回输出时间序列。
@@ -365,6 +395,7 @@ def run_fastscape_series(
     - time_total: 总模拟时间。
     - rainfall_factor: FastScape FlowAccumulator.runoff，单位面积地表径流/降雨系数。
     - rainfall_model: 可选 RainfallConfig，支持用户 Python 函数 p=f(x,y,z,t)。
+    - initial_dem: 可选显式初始地形；不填时使用 FastScape 随机初始地形。
     - initial_topography_seed: 初始随机地形种子。固定种子可让 GA 目标函数可复现。
     - output_steps: 输出地形序列帧数。
 
@@ -386,7 +417,11 @@ def run_fastscape_series(
         # Pecube cannot reliably consume FastScape's raw t=0 random seed
         # topography as the oldest surface. Emit only evolved snapshots while
         # keeping the output clock aligned with the master clock.
-        master_times, out_times = _fastscape_times(time_total, output_steps)
+        master_times, out_times = _fastscape_times(
+            time_total,
+            output_steps,
+            required_output_times=required_output_times,
+        )
         rainfall = rainfall_model if rainfall_model is not None else rainfall_factor
         model, rainfall_input = _model_and_rainfall_input(rainfall, time_total=time_total)
         input_vars = {
@@ -394,13 +429,20 @@ def run_fastscape_series(
             'grid__length': [y_size * spacing, x_size * spacing],
             'boundary__status': boundary_status,
             'uplift__rate': uplift * 10**(-3),
-            'init_topography__seed': initial_topography_seed,
             'spl__k_coef': k_sp,
             'spl__area_exp': area_exp,
             'spl__slope_exp': slope_exp,
             'diffusion__diffusivity': k_diff * 10**(-2),
             **rainfall_input,
         }
+        model = _apply_initial_topography(
+            model,
+            input_vars,
+            initial_dem,
+            y_size=y_size,
+            x_size=x_size,
+            initial_topography_seed=initial_topography_seed,
+        )
         ds_in = xs.create_setup(
             model=model,
             clocks={'time': master_times, 'out': out_times},
@@ -435,6 +477,7 @@ def run_fastscape_time_scaled_series(
     rainfall_model=None,
     initial_topography_seed=42,
     output_steps=21,
+    required_output_times=None,
 ):
     """Run FastScape with ``U(x,y,t) = U_base(x,y) * multiplier(stage)``.
 
@@ -457,7 +500,11 @@ def run_fastscape_time_scaled_series(
 
         warnings.filterwarnings("ignore", category=FutureWarning,
                             message="variable .* with name matching its dimension")
-        master_times, out_times = _fastscape_times(time_total, output_steps)
+        master_times, out_times = _fastscape_times(
+            time_total,
+            output_steps,
+            required_output_times=required_output_times,
+        )
         rainfall = rainfall_model if rainfall_model is not None else rainfall_factor
         model, rainfall_input = _model_and_rainfall_input(rainfall, time_total=time_total)
         model = model.update_processes({"uplift": TimeScaledUplift})
@@ -474,12 +521,14 @@ def run_fastscape_time_scaled_series(
             'diffusion__diffusivity': k_diff * 10**(-2),
             **rainfall_input,
         }
-        if initial_dem is None:
-            input_vars['init_topography__seed'] = initial_topography_seed
-        else:
-            initial = align_model_field(initial_dem, (int(y_size), int(x_size)), label="initial_dem", order=1)
-            model = model.update_processes({"init_topography": InitialDEM})
-            input_vars['init_topography__initial_elevation'] = initial
+        model = _apply_initial_topography(
+            model,
+            input_vars,
+            initial_dem,
+            y_size=y_size,
+            x_size=x_size,
+            initial_topography_seed=initial_topography_seed,
+        )
 
         ds_in = xs.create_setup(
             model=model,
@@ -517,6 +566,7 @@ def run_fastscape_model(
     time_total=10e6,
     rainfall_factor=1.0,
     rainfall_model=None,
+    initial_dem=None,
     initial_topography_seed=42
 ):
     """运行 FastScape 模型并返回最终地形。"""
@@ -533,6 +583,7 @@ def run_fastscape_model(
         time_total=time_total,
         rainfall_factor=rainfall_factor,
         rainfall_model=rainfall_model,
+        initial_dem=initial_dem,
         initial_topography_seed=initial_topography_seed,
         output_steps=21,
     )

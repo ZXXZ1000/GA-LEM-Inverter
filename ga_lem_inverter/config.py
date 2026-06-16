@@ -155,19 +155,35 @@ def _validate_minimal_config(config: configparser.ConfigParser, mode: str) -> No
 
 
 def _validate_model_parameters(config: configparser.ConfigParser) -> None:
-    if "rainfall_factor" not in config["Model"]:
-        return
+    if "rainfall_factor" in config["Model"]:
+        try:
+            rainfall_factor = config.getfloat("Model", "rainfall_factor")
+        except ValueError as exc:
+            raise UserConfigError("[Model] rainfall_factor 必须是数字。") from exc
+
+        if not math.isfinite(rainfall_factor) or rainfall_factor <= 0:
+            raise UserConfigError(
+                "[Model] rainfall_factor 必须为正数。"
+                f"当前值为 {config.get('Model', 'rainfall_factor')}。"
+            )
+
+    initial_topography = config.get("Model", "initial_topography", fallback="random").strip().lower()
+    if initial_topography not in {"random", "flat"}:
+        raise UserConfigError("[Model] initial_topography 必须是 random 或 flat。")
 
     try:
-        rainfall_factor = config.getfloat("Model", "rainfall_factor")
+        initial_elevation = config.getfloat("Model", "initial_elevation", fallback=0.0)
     except ValueError as exc:
-        raise UserConfigError("[Model] rainfall_factor 必须是数字。") from exc
+        raise UserConfigError("[Model] initial_elevation 必须是数字。") from exc
+    if not math.isfinite(initial_elevation):
+        raise UserConfigError("[Model] initial_elevation 不能是 NaN/Inf。")
 
-    if not math.isfinite(rainfall_factor) or rainfall_factor <= 0:
-        raise UserConfigError(
-            "[Model] rainfall_factor 必须为正数。"
-            f"当前值为 {config.get('Model', 'rainfall_factor')}。"
-        )
+    try:
+        initial_seed = config.getint("Model", "initial_topography_seed", fallback=42)
+    except ValueError as exc:
+        raise UserConfigError("[Model] initial_topography_seed 必须是整数。") from exc
+    if initial_seed < 0:
+        raise UserConfigError("[Model] initial_topography_seed 必须是非负整数。")
 
 
 def _config_value_is_empty(value: str) -> bool:
