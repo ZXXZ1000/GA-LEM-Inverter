@@ -657,8 +657,9 @@ def _plot_topography_history_summary(
     if initial.shape != series.shape[1:]:
         initial = align_model_field(initial, series.shape[1:], label="initial_topography_plot", order=1)
 
-    finite = np.concatenate([initial[np.isfinite(initial)].ravel(), series[np.isfinite(series)].ravel()])
-    if finite.size == 0:
+    initial_finite = initial[np.isfinite(initial)]
+    series_finite = series[np.isfinite(series)]
+    if initial_finite.size == 0 and series_finite.size == 0:
         logging.warning("跳过地形演化图：没有有效地形数值。")
         return
 
@@ -689,10 +690,14 @@ def _plot_topography_history_summary(
     present_elapsed = float(output_times[-1]) if output_times is not None else float(total_time_years or series.shape[0] - 1)
     states.append(("Present day\n0 Ma", present_elapsed, series[-1]))
 
-    vmin = float(np.nanmin(finite))
-    vmax = float(np.nanmax(finite))
-    if not np.isfinite(vmin) or not np.isfinite(vmax) or vmin == vmax:
-        vmin, vmax = 0.0, 1.0
+    shared_vmin = float(np.nanmin(series_finite)) if series_finite.size else 0.0
+    shared_vmax = float(np.nanmax(series_finite)) if series_finite.size else 1.0
+    if not np.isfinite(shared_vmin) or not np.isfinite(shared_vmax) or shared_vmin == shared_vmax:
+        shared_vmin, shared_vmax = 0.0, 1.0
+    initial_vmin = float(np.nanmin(initial_finite)) if initial_finite.size else shared_vmin
+    initial_vmax = float(np.nanmax(initial_finite)) if initial_finite.size else shared_vmax
+    if not np.isfinite(initial_vmin) or not np.isfinite(initial_vmax) or initial_vmin == initial_vmax:
+        initial_vmin, initial_vmax = shared_vmin, shared_vmax
 
     multipliers = None
     if stage_multipliers is not None:
@@ -757,20 +762,28 @@ def _plot_topography_history_summary(
     state_grid = outer[1].subgridspec(1, n_states, wspace=0.04)
     state_axes = [fig.add_subplot(state_grid[0, idx]) for idx in range(n_states)]
     terrain_im = None
+    initial_im = None
     for idx, (ax, (label, _, terrain)) in enumerate(zip(state_axes, states)):
-        terrain_im = ax.imshow(
+        image = ax.imshow(
             oriented_display_array(terrain, rotated=display_rotated),
             cmap="terrain",
             origin="upper",
-            vmin=vmin,
-            vmax=vmax,
+            vmin=initial_vmin if idx == 0 else shared_vmin,
+            vmax=initial_vmax if idx == 0 else shared_vmax,
         )
+        if idx == 0:
+            initial_im = image
+        else:
+            terrain_im = image
         ax.set_title(label, fontsize=10.5, pad=7)
         ax.set_axis_off()
 
+    if initial_im is not None:
+        initial_cbar = fig.colorbar(initial_im, ax=state_axes[0], shrink=0.86, pad=0.012)
+        initial_cbar.set_label(f"Initial scale (m) {initial_vmin:.0f}-{initial_vmax:.0f}")
     if terrain_im is not None:
-        cbar = fig.colorbar(terrain_im, ax=state_axes, shrink=0.86, pad=0.018)
-        cbar.set_label(f"Elevation (m), shared scale {vmin:.0f}-{vmax:.0f}")
+        cbar = fig.colorbar(terrain_im, ax=state_axes[1:], shrink=0.86, pad=0.018)
+        cbar.set_label(f"Elevation (m), shared scale {shared_vmin:.0f}-{shared_vmax:.0f}")
 
     fig.suptitle(
         "Uplift history and key topography states",
